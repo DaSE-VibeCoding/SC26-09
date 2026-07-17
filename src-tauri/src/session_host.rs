@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 mod codex_app_server;
 
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 const MAX_ID: usize = 256;
 const MAX_ACTIVITY_KEY: usize = 512;
 const MAX_TEXT: usize = 4096;
@@ -41,7 +41,7 @@ struct StreamState {
     source: Option<SourceIdentity>,
     current_turn: Option<TurnIdentity>,
     pending_attention_keys: HashSet<String>,
-    turn_completed: bool,
+    terminal_outcome: Option<TerminalOutcome>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,6 +127,13 @@ enum LifecycleEvidence {
     Fallback,
     Structured,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum TerminalOutcome {
+    Completed,
+    Failed,
+    Interrupted,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum SourceIntegration {
@@ -183,8 +190,9 @@ enum CandidateActivity {
         evidence: LifecycleEvidence,
         key: String,
     },
-    TurnCompleted {
+    TurnEnded {
         evidence: LifecycleEvidence,
+        outcome: TerminalOutcome,
     },
 }
 #[derive(Clone, Serialize)]
@@ -206,8 +214,9 @@ enum HostActivity {
         evidence: StructuredEvidence,
         key: String,
     },
-    TurnCompleted {
+    TurnEnded {
         evidence: StructuredEvidence,
+        outcome: TerminalOutcome,
     },
 }
 #[derive(Clone)]
@@ -409,7 +418,7 @@ fn open(
             source: None,
             current_turn: None,
             pending_attention_keys: HashSet::new(),
-            turn_completed: false,
+            terminal_outcome: None,
         },
         pty: Arc::new(Mutex::new(pty)),
         stopper,
@@ -743,7 +752,7 @@ fn accept_structured_activity(
         CandidateActivity::TurnStarted { .. } => {
             stream.current_turn = Some(input.context.turn.clone());
             stream.pending_attention_keys.clear();
-            stream.turn_completed = false;
+            stream.terminal_outcome = None;
         }
         CandidateActivity::AttentionRequested { key, .. } => {
             stream.pending_attention_keys.insert(key.clone());
@@ -751,8 +760,8 @@ fn accept_structured_activity(
         CandidateActivity::AttentionResolved { key, .. } => {
             stream.pending_attention_keys.remove(key);
         }
-        CandidateActivity::TurnCompleted { .. } => {
-            stream.turn_completed = true;
+        CandidateActivity::TurnEnded { outcome, .. } => {
+            stream.terminal_outcome = Some(*outcome);
         }
     }
 
@@ -783,8 +792,9 @@ fn host_activity(activity: CandidateActivity) -> HostActivity {
             evidence: StructuredEvidence::Structured,
             key,
         },
-        CandidateActivity::TurnCompleted { .. } => HostActivity::TurnCompleted {
+        CandidateActivity::TurnEnded { outcome, .. } => HostActivity::TurnEnded {
             evidence: StructuredEvidence::Structured,
+            outcome,
         },
     }
 }
@@ -842,14 +852,14 @@ fn validate_activity_order(
                 if current_turn == turn {
                     return Err("Duplicate structured turn start".into());
                 }
-                if !stream.turn_completed || !stream.pending_attention_keys.is_empty() {
+                if stream.terminal_outcome.is_none() || !stream.pending_attention_keys.is_empty() {
                     return Err("Structured turn start is out of order".into());
                 }
             }
         }
         CandidateActivity::AttentionRequested { key, .. } => {
             require_current_turn(stream, turn)?;
-            if stream.turn_completed {
+            if stream.terminal_outcome.is_some() {
                 return Err("Structured attention request is stale".into());
             }
             if stream.pending_attention_keys.contains(key) {
@@ -862,10 +872,10 @@ fn validate_activity_order(
                 return Err("Structured attention resolution is uncorrelated".into());
             }
         }
-        CandidateActivity::TurnCompleted { .. } => {
+        CandidateActivity::TurnEnded { .. } => {
             require_current_turn(stream, turn)?;
-            if stream.turn_completed {
-                return Err("Duplicate structured turn completion".into());
+            if stream.terminal_outcome.is_some() {
+                return Err("Duplicate or conflicting structured terminal outcome".into());
             }
         }
     }
@@ -883,7 +893,7 @@ fn require_current_turn(stream: &StreamState, turn: &TurnIdentity) -> Result<(),
 fn activity_evidence(activity: &CandidateActivity) -> &LifecycleEvidence {
     match activity {
         CandidateActivity::TurnStarted { evidence }
-        | CandidateActivity::TurnCompleted { evidence }
+        | CandidateActivity::TurnEnded { evidence, .. }
         | CandidateActivity::AttentionRequested { evidence, .. }
         | CandidateActivity::AttentionResolved { evidence, .. } => evidence,
     }
@@ -893,7 +903,7 @@ fn activity_attention_key(activity: &CandidateActivity) -> Option<&str> {
     match activity {
         CandidateActivity::AttentionRequested { key, .. }
         | CandidateActivity::AttentionResolved { key, .. } => Some(key),
-        CandidateActivity::TurnStarted { .. } | CandidateActivity::TurnCompleted { .. } => None,
+        CandidateActivity::TurnStarted { .. } | CandidateActivity::TurnEnded { .. } => None,
     }
 }
 
@@ -1139,7 +1149,7 @@ mod tests {
             source,
             current_turn: None,
             pending_attention_keys: HashSet::new(),
-            turn_completed: false,
+            terminal_outcome: None,
         }
     }
 
@@ -1162,8 +1172,9 @@ mod tests {
     }
 
     fn turn_completed() -> CandidateActivity {
-        CandidateActivity::TurnCompleted {
+        CandidateActivity::TurnEnded {
             evidence: LifecycleEvidence::Structured,
+            outcome: TerminalOutcome::Completed,
         }
     }
 
@@ -1182,7 +1193,7 @@ mod tests {
     }
 
     #[test]
-    fn serialization_matches_v2() {
+    fn serialization_matches_v3() {
         let value = serde_json::to_value(HostedSessionSnapshot {
             protocol_version: VERSION,
             session_id: "s".into(),
@@ -1194,7 +1205,7 @@ mod tests {
             },
         })
         .unwrap();
-        assert_eq!(value["protocolVersion"], 2);
+        assert_eq!(value["protocolVersion"], 3);
         assert_eq!(value["transport"]["type"], "pty");
         assert_eq!(value["transport"]["lifecycleEvidence"], "fallback");
         assert!(value["transport"].get("source").is_none());
@@ -1512,7 +1523,7 @@ mod tests {
         )
         .expect("completion accepted while attention remains pending");
         assert_eq!(stream.sequence, 3);
-        assert!(stream.turn_completed);
+        assert_eq!(stream.terminal_outcome, Some(TerminalOutcome::Completed));
 
         assert!(accept_structured_activity(
             "session-1",

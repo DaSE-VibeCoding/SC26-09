@@ -141,8 +141,9 @@ const FALLBACK_SUBMISSION_EVENTS = [
 ] satisfies readonly ActivityEvent[];
 
 const FALLBACK_TURN_COMPLETED_EVENT = {
-  type: "turn-completed",
+  type: "turn-ended",
   evidence: "fallback",
+  outcome: "completed",
 } satisfies ActivityEvent;
 
 interface DiscoveryCleanupPlan {

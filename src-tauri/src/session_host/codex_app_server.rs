@@ -27,24 +27,10 @@ enum HandshakeMarker {
     ThreadBound,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum TerminalStatus {
-    Failed,
-    Interrupted,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct TerminalOutcome {
-    thread_id: String,
-    turn_id: String,
-    status: TerminalStatus,
-}
-
 enum DecodeOutput {
     Ignored,
     Handshake(HandshakeMarker),
     Activity(Envelope),
-    Terminal(TerminalOutcome),
 }
 
 #[derive(Clone)]
@@ -212,30 +198,25 @@ impl Decoder {
                     .get("status")
                     .and_then(Value::as_str)
                     .ok_or("Missing Codex completion status")?;
-                match status {
-                    "completed" => Ok(DecodeOutput::Activity(accept_structured_activity(
-                        session_id,
-                        stream,
-                        activity_input(
-                            thread_id,
-                            turn_id,
-                            CandidateActivity::TurnCompleted {
-                                evidence: LifecycleEvidence::Structured,
-                            },
-                        ),
-                    )?)),
-                    "failed" | "interrupted" => Ok(DecodeOutput::Terminal(TerminalOutcome {
-                        thread_id: thread_id.into(),
-                        turn_id: turn_id.into(),
-                        status: if status == "failed" {
-                            TerminalStatus::Failed
-                        } else {
-                            TerminalStatus::Interrupted
+                let outcome = match status {
+                    "completed" => TerminalOutcome::Completed,
+                    "failed" => TerminalOutcome::Failed,
+                    "interrupted" => TerminalOutcome::Interrupted,
+                    "inProgress" => return Err("Codex completion cannot remain in progress".into()),
+                    _ => return Err("Unknown Codex completion status".into()),
+                };
+                Ok(DecodeOutput::Activity(accept_structured_activity(
+                    session_id,
+                    stream,
+                    activity_input(
+                        thread_id,
+                        turn_id,
+                        CandidateActivity::TurnEnded {
+                            evidence: LifecycleEvidence::Structured,
+                            outcome,
                         },
-                    })),
-                    "inProgress" => Err("Codex completion cannot remain in progress".into()),
-                    _ => Err("Unknown Codex completion status".into()),
-                }
+                    ),
+                )?))
             }
             (_, "item/tool/requestUserInput")
             | (_, "mcpServer/elicitation/create")
@@ -391,7 +372,7 @@ mod tests {
             source: None,
             current_turn: None,
             pending_attention_keys: HashSet::new(),
-            turn_completed: false,
+            terminal_outcome: None,
         }
     }
     fn handshake(decoder: &mut Decoder, stream: &mut StreamState) {
@@ -608,7 +589,7 @@ mod tests {
         d.decode(Direction::Server, resolved(json!(7)), "s", &mut s)
             .unwrap();
         assert_eq!(d.pending.len(), 1);
-        assert!(s.turn_completed);
+        assert_eq!(s.terminal_outcome, Some(TerminalOutcome::Completed));
         assert!(d
             .decode(Direction::Server, resolved(json!(7)), "s", &mut s)
             .is_err());
@@ -660,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_status_matrix_is_typed_and_non_mutating_when_not_completed() {
+    fn completion_status_matrix_routes_all_terminal_outcomes_through_the_gate() {
         for status in ["failed", "interrupted", "inProgress", "future"] {
             let mut d = Decoder::default();
             let mut s = stream();
@@ -668,13 +649,22 @@ mod tests {
             d.decode(Direction::Server, started(), "s", &mut s).unwrap();
             let before = s.sequence;
             let result = d.decode(Direction::Server, completed(status), "s", &mut s);
-            match status {
-                "failed" | "interrupted" => {
-                    assert!(matches!(result.unwrap(), DecodeOutput::Terminal(_)))
-                }
-                _ => assert!(result.is_err()),
+            if matches!(status, "failed" | "interrupted") {
+                assert!(matches!(result.unwrap(), DecodeOutput::Activity(_)));
+                assert_eq!(s.sequence, before + 1);
+                assert_eq!(
+                    s.terminal_outcome,
+                    Some(if status == "failed" {
+                        TerminalOutcome::Failed
+                    } else {
+                        TerminalOutcome::Interrupted
+                    })
+                );
+            } else {
+                assert!(result.is_err());
+                assert_eq!(s.sequence, before);
+                assert!(s.terminal_outcome.is_none());
             }
-            assert_eq!(s.sequence, before);
         }
         let mut d = Decoder::default();
         let mut s = stream();

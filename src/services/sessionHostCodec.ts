@@ -137,9 +137,13 @@ function activity(value: unknown): TransportActivityEvent {
         evidence: structuredActivityEvidence(input.evidence),
         key: boundedString(input.key, "activity key", SESSION_HOST_MAX_ACTIVITY_KEY_LENGTH),
       };
-    case "turn-completed":
-      exactKeys(input, ["type", "evidence"], "activity");
-      return { type: "turn-completed", evidence: structuredActivityEvidence(input.evidence) };
+    case "turn-ended":
+      exactKeys(input, ["type", "evidence", "outcome"], "activity");
+      return {
+        type: "turn-ended",
+        evidence: structuredActivityEvidence(input.evidence),
+        outcome: literalOneOf(input.outcome, "terminal outcome", ["completed", "failed", "interrupted"]),
+      };
     case "result-reviewed":
       throw new Error("result-reviewed is local-only activity");
     default:

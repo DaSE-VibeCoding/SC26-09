@@ -121,7 +121,7 @@ describe("prompt input construction", () => {
   it("constructs one semantic prompt input for protocol bindings", () => {
     expect(buildPromptSendRequests(session(), protocolConnection("ready"), "  hello provider  ")).toEqual([
       {
-        protocolVersion: 2,
+        protocolVersion: 3,
         sessionId: "session-1",
         streamId: "stream-1",
         input: { type: "prompt", text: "hello provider" },
@@ -131,23 +131,23 @@ describe("prompt input construction", () => {
 
   it("preserves Codex PTY fallback's separate text write and carriage return", () => {
     expect(buildPromptSendRequests(session({ agentId: "codex" }), fallbackConnection(), "hello")).toEqual([
-      { protocolVersion: 2, sessionId: "session-1", streamId: "stream-1", input: { type: "terminal", data: "hello" } },
-      { protocolVersion: 2, sessionId: "session-1", streamId: "stream-1", input: { type: "terminal", data: "\r" } },
+      { protocolVersion: 3, sessionId: "session-1", streamId: "stream-1", input: { type: "terminal", data: "hello" } },
+      { protocolVersion: 3, sessionId: "session-1", streamId: "stream-1", input: { type: "terminal", data: "\r" } },
     ]);
 
     expect(buildPromptSendRequests(session({ agentId: "codex" }), fallbackConnection(), "hello\nworld")).toEqual([
-      { protocolVersion: 2, sessionId: "session-1", streamId: "stream-1", input: { type: "terminal", data: "\x1b[200~hello\nworld\x1b[201~" } },
-      { protocolVersion: 2, sessionId: "session-1", streamId: "stream-1", input: { type: "terminal", data: "\r" } },
+      { protocolVersion: 3, sessionId: "session-1", streamId: "stream-1", input: { type: "terminal", data: "\x1b[200~hello\nworld\x1b[201~" } },
+      { protocolVersion: 3, sessionId: "session-1", streamId: "stream-1", input: { type: "terminal", data: "\r" } },
     ]);
   });
 
   it("preserves existing single terminal writes for non-Codex PTY fallback", () => {
     expect(buildPromptSendRequests(session({ agentId: "claude-code" }), fallbackConnection(), "hello")).toEqual([
-      { protocolVersion: 2, sessionId: "session-1", streamId: "stream-1", input: { type: "terminal", data: "hello\r" } },
+      { protocolVersion: 3, sessionId: "session-1", streamId: "stream-1", input: { type: "terminal", data: "hello\r" } },
     ]);
 
     expect(buildPromptSendRequests(session({ agentId: "pi" }), fallbackConnection(), "hello\nworld")).toEqual([
-      { protocolVersion: 2, sessionId: "session-1", streamId: "stream-1", input: { type: "terminal", data: "\x1b[200~hello\nworld\x1b[201~\r" } },
+      { protocolVersion: 3, sessionId: "session-1", streamId: "stream-1", input: { type: "terminal", data: "\x1b[200~hello\nworld\x1b[201~\r" } },
     ]);
   });
 
@@ -157,7 +157,7 @@ describe("prompt input construction", () => {
       structuredPtyConnection("ready"),
       "hello",
     )).toEqual([
-      { protocolVersion: 2, sessionId: "session-1", streamId: "stream-1", input: { type: "terminal", data: "hello\r" } },
+      { protocolVersion: 3, sessionId: "session-1", streamId: "stream-1", input: { type: "terminal", data: "hello\r" } },
     ]);
   });
 

@@ -107,7 +107,7 @@ export function createLiveTurnLifecycleFromSessionStatus(
     case "working":
       return reduceLiveTurnLifecycle(initial, { type: "turn-started", evidence: "fallback" });
     case "done":
-      return reduceLiveTurnLifecycle(initial, { type: "turn-completed", evidence: "fallback" });
+      return reduceLiveTurnLifecycle(initial, { type: "turn-ended", evidence: "fallback", outcome: "completed" });
     case "idle":
     case "available":
     case "offline":

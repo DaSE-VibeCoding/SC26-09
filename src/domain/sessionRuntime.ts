@@ -1,4 +1,4 @@
-import type { ActivityEvent, LiveTurnLifecycle } from "./lifecycle";
+import type { ActivityEvent, LiveTurnLifecycle, TerminalOutcome } from "./lifecycle";
 import type { AgentSession } from "./models";
 import type {
   HostedSessionSnapshot,
@@ -29,7 +29,7 @@ export interface SessionConnectionSnapshot {
   readonly source?: StructuredLifecycleSource;
   readonly currentTurn?: StructuredTurnIdentity;
   readonly pendingAttentionKeys?: readonly string[];
-  readonly turnCompleted?: boolean;
+  readonly terminalOutcome?: TerminalOutcome;
 }
 
 export interface SessionRuntimeState {
@@ -128,7 +128,7 @@ export function reduceSessionRuntime(state: SessionRuntimeState, action: Session
             source: transportSource(snapshot.transport),
             currentTurn: connection?.streamId === snapshot.streamId ? connection.currentTurn : undefined,
             pendingAttentionKeys: connection?.streamId === snapshot.streamId ? connection.pendingAttentionKeys : undefined,
-            turnCompleted: connection?.streamId === snapshot.streamId ? connection.turnCompleted : undefined,
+            terminalOutcome: connection?.streamId === snapshot.streamId ? connection.terminalOutcome : undefined,
           },
         },
         cursorBySessionId: { ...connectedState.cursorBySessionId, [snapshot.sessionId]: snapshot.lastSequence },
@@ -256,20 +256,20 @@ function acceptHostActivity(
   if (event.activity.type === "turn-started") {
     if (currentTurn) {
       if (turnMatches(currentTurn, nextTurn)) return undefined;
-      if (!connection.turnCompleted || pendingAttentionKeys.length > 0) return undefined;
+      if (!connection.terminalOutcome || pendingAttentionKeys.length > 0) return undefined;
     }
     return {
       ...connection,
       currentTurn: nextTurn,
       pendingAttentionKeys: [],
-      turnCompleted: false,
+      terminalOutcome: undefined,
     };
   }
 
   if (!currentTurn || !turnMatches(currentTurn, nextTurn)) return undefined;
 
   if (event.activity.type === "attention-requested") {
-    if (connection.turnCompleted || pendingAttentionKeys.includes(event.activity.key)) return undefined;
+    if (connection.terminalOutcome || pendingAttentionKeys.includes(event.activity.key)) return undefined;
     return { ...connection, pendingAttentionKeys: [...pendingAttentionKeys, event.activity.key] };
   } else if (event.activity.type === "attention-resolved") {
     const resolvedKey = event.activity.key;
@@ -278,9 +278,9 @@ function acceptHostActivity(
       ...connection,
       pendingAttentionKeys: pendingAttentionKeys.filter((key) => key !== resolvedKey),
     };
-  } else if (event.activity.type === "turn-completed") {
-    if (connection.turnCompleted) return undefined;
-    return { ...connection, turnCompleted: true };
+  } else if (event.activity.type === "turn-ended") {
+    if (connection.terminalOutcome) return undefined;
+    return { ...connection, terminalOutcome: event.activity.outcome };
   }
 
   return undefined;

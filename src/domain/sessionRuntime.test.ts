@@ -24,7 +24,7 @@ const claudeSource: StructuredLifecycleSource = {
 const turn: StructuredTurnIdentity = { key: "turn-1", provenance: "provider-turn" };
 const otherTurn: StructuredTurnIdentity = { key: "turn-2", provenance: "provider-turn" };
 const envelope = (sequence: number, event: SessionEventEnvelope["event"], streamId = "stream-1"): SessionEventEnvelope => ({
-  protocolVersion: 2, sessionId: "s", streamId, sequence, event,
+  protocolVersion: 3, sessionId: "s", streamId, sequence, event,
 });
 const fallbackOpened = (streamId = "stream-1") => envelope(0, { type: "opened", transport: { type: "pty", lifecycleEvidence: "fallback" } }, streamId);
 const structuredOpened = (streamId = "stream-1", openSource: StructuredLifecycleSource = handshakeSource) => envelope(0, { type: "opened", transport: { type: "protocol", lifecycleEvidence: "structured", source: openSource } }, streamId);
@@ -39,7 +39,7 @@ const activity = (
 describe("session runtime reducer", () => {
   it("atomically initializes, applies local activity, reviews, and removes", () => {
     let state = reduceSessionRuntime(createSessionRuntimeState([session({ status: "available" })]), { type: "initialize", sessionId: "s", mode: "fresh" });
-    state = reduceSessionRuntime(state, { type: "activity", sessionId: "s", events: [{ type: "turn-completed", evidence: "fallback" }], patch: { unread: true } });
+    state = reduceSessionRuntime(state, { type: "activity", sessionId: "s", events: [{ type: "turn-ended", evidence: "fallback", outcome: "completed" }], patch: { unread: true } });
     expect(state.sessions[0]).toEqual(expect.objectContaining({ status: "done", unread: true }));
     expect(state.lifecycleBySessionId.s.phase).toBe("completed");
     state = reduceSessionRuntime(state, { type: "review", sessionId: "s" });
@@ -56,8 +56,8 @@ describe("session runtime reducer", () => {
     state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(2, { type: "turn-started", evidence: "structured" }) });
     const accepted = state;
     expect(state.sessions[0].status).toBe("working");
-    expect(reduceSessionRuntime(state, { type: "host-event", envelope: activity(2, { type: "turn-completed", evidence: "structured" }) })).toBe(state);
-    expect(reduceSessionRuntime(state, { type: "host-event", envelope: activity(1, { type: "turn-completed", evidence: "structured" }) })).toBe(accepted);
+    expect(reduceSessionRuntime(state, { type: "host-event", envelope: activity(2, { type: "turn-ended", evidence: "structured", outcome: "completed" }) })).toBe(state);
+    expect(reduceSessionRuntime(state, { type: "host-event", envelope: activity(1, { type: "turn-ended", evidence: "structured", outcome: "completed" }) })).toBe(accepted);
   });
 
   it("keeps close final and cannot close a replacement stream with an old event", () => {
@@ -77,7 +77,7 @@ describe("session runtime reducer", () => {
       session({ status: "available", connected: false, running: false }),
     ]), {
       type: "host-snapshot",
-      snapshot: { protocolVersion: 2, sessionId: "s", streamId: "stream-1", lastSequence: 4, transport: { type: "pty", lifecycleEvidence: "fallback" } },
+      snapshot: { protocolVersion: 3, sessionId: "s", streamId: "stream-1", lastSequence: 4, transport: { type: "pty", lifecycleEvidence: "fallback" } },
     });
     expect(snapshotState.sessions[0]).toEqual(expect.objectContaining({ connected: true, running: true }));
     expect(snapshotState.connectionBySessionId.s.promptReadiness).toBe("pty-fallback-sendable");
@@ -109,20 +109,20 @@ describe("session runtime reducer", () => {
 
     const sameStream = reduceSessionRuntime(ready, {
       type: "host-snapshot",
-      snapshot: { protocolVersion: 2, sessionId: "s", streamId: "stream-1", lastSequence: 0, transport: { type: "protocol", lifecycleEvidence: "structured", source: handshakeSource } },
+      snapshot: { protocolVersion: 3, sessionId: "s", streamId: "stream-1", lastSequence: 0, transport: { type: "protocol", lifecycleEvidence: "structured", source: handshakeSource } },
     });
     expect(sameStream.connectionBySessionId.s.promptReadiness).toBe("ready");
 
     const replacement = reduceSessionRuntime(sameStream, {
       type: "host-snapshot",
-      snapshot: { protocolVersion: 2, sessionId: "s", streamId: "stream-2", lastSequence: 0, transport: { type: "pty", lifecycleEvidence: "fallback" } },
+      snapshot: { protocolVersion: 3, sessionId: "s", streamId: "stream-2", lastSequence: 0, transport: { type: "pty", lifecycleEvidence: "fallback" } },
     });
     expect(replacement.connectionBySessionId.s).toEqual(expect.objectContaining({
       streamId: "stream-2",
       promptReadiness: "pty-fallback-sendable",
       currentTurn: undefined,
       pendingAttentionKeys: undefined,
-      turnCompleted: undefined,
+      terminalOutcome: undefined,
     }));
   });
 
@@ -137,7 +137,7 @@ describe("session runtime reducer", () => {
   it("latches structured authority against later local fallback", () => {
     let state = reduceSessionRuntime(createSessionRuntimeState([session()]), { type: "host-event", envelope: structuredOpened() });
     state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(1, { type: "turn-started", evidence: "structured" }) });
-    state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(2, { type: "turn-completed", evidence: "structured" }) });
+    state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(2, { type: "turn-ended", evidence: "structured", outcome: "completed" }) });
     const lifecycle = state.lifecycleBySessionId.s;
     state = reduceSessionRuntime(state, { type: "activity", sessionId: "s", events: [{ type: "turn-started", evidence: "fallback" }] });
     expect(state.sessions[0].status).toBe("done");
@@ -147,7 +147,7 @@ describe("session runtime reducer", () => {
   it("applies snapshots and replays deterministically without mutating inputs", () => {
     const initial = createSessionRuntimeState([session()]);
     const actions = [
-      { type: "host-snapshot", snapshot: { protocolVersion: 2, sessionId: "s", streamId: "stream-1", lastSequence: 4, transport: { type: "protocol", lifecycleEvidence: "structured", source: handshakeSource } } },
+      { type: "host-snapshot", snapshot: { protocolVersion: 3, sessionId: "s", streamId: "stream-1", lastSequence: 4, transport: { type: "protocol", lifecycleEvidence: "structured", source: handshakeSource } } },
       { type: "host-event", envelope: activity(5, { type: "turn-started", evidence: "structured" }) },
     ] as const;
     const replay = () => actions.reduce(reduceSessionRuntime, initial);
@@ -159,11 +159,11 @@ describe("session runtime reducer", () => {
     let state = reduceSessionRuntime(createSessionRuntimeState([session()]), { type: "host-event", envelope: fallbackOpened() });
     state = reduceSessionRuntime(state, { type: "host-event", envelope: envelope(4, { type: "terminal-output", data: "new" }) });
     const current = state;
-    state = reduceSessionRuntime(state, { type: "host-snapshot", snapshot: { protocolVersion: 2, sessionId: "s", streamId: "stream-1", lastSequence: 2, transport: { type: "pty", lifecycleEvidence: "fallback" } } });
+    state = reduceSessionRuntime(state, { type: "host-snapshot", snapshot: { protocolVersion: 3, sessionId: "s", streamId: "stream-1", lastSequence: 2, transport: { type: "pty", lifecycleEvidence: "fallback" } } });
     expect(state).toBe(current);
     state = reduceSessionRuntime(state, { type: "host-event", envelope: envelope(5, { type: "closed", outcome: { type: "exited", success: true } }) });
     const closed = state;
-    state = reduceSessionRuntime(state, { type: "host-snapshot", snapshot: { protocolVersion: 2, sessionId: "s", streamId: "stream-1", lastSequence: 5, transport: { type: "pty", lifecycleEvidence: "fallback" } } });
+    state = reduceSessionRuntime(state, { type: "host-snapshot", snapshot: { protocolVersion: 3, sessionId: "s", streamId: "stream-1", lastSequence: 5, transport: { type: "pty", lifecycleEvidence: "fallback" } } });
     expect(state).toBe(closed);
   });
 
@@ -204,7 +204,7 @@ describe("session runtime reducer", () => {
   it("rejects wrong-turn activity before cursor advancement", () => {
     let state = reduceSessionRuntime(createSessionRuntimeState([session()]), { type: "host-event", envelope: structuredOpened() });
     state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(1, { type: "turn-started", evidence: "structured" }) });
-    const rejected = reduceSessionRuntime(state, { type: "host-event", envelope: activity(2, { type: "turn-completed", evidence: "structured" }, otherTurn) });
+    const rejected = reduceSessionRuntime(state, { type: "host-event", envelope: activity(2, { type: "turn-ended", evidence: "structured", outcome: "completed" }, otherTurn) });
 
     expect(rejected).toBe(state);
     expect(rejected.cursorBySessionId.s).toBe(1);
@@ -215,15 +215,47 @@ describe("session runtime reducer", () => {
     let state = reduceSessionRuntime(createSessionRuntimeState([session({ status: "idle" })]), { type: "host-event", envelope: structuredOpened() });
     state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(1, { type: "turn-started", evidence: "structured" }) });
     expect(state.sessions[0].status).toBe("working");
-    state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(2, { type: "turn-completed", evidence: "structured" }) });
+    state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(2, { type: "turn-ended", evidence: "structured", outcome: "completed" }) });
     expect(state.sessions[0].status).toBe("done");
     expect(state.connectionBySessionId.s.currentTurn).toEqual(turn);
+  });
+
+  it.each([
+    ["completed", "done"],
+    ["failed", "attention"],
+    ["interrupted", "idle"],
+  ] as const)("accepts exact %s outcome once and rejects duplicate or conflicting outcomes", (outcome, status) => {
+    let state = reduceSessionRuntime(createSessionRuntimeState([session()]), { type: "host-event", envelope: structuredOpened() });
+    state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(1, { type: "turn-started", evidence: "structured" }) });
+    state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(2, { type: "turn-ended", evidence: "structured", outcome }) });
+    expect(state.sessions[0].status).toBe(status);
+    expect(state.connectionBySessionId.s.terminalOutcome).toBe(outcome);
+    expect(state.cursorBySessionId.s).toBe(2);
+
+    for (const conflict of [outcome, outcome === "failed" ? "completed" : "failed"] as const) {
+      const rejected = reduceSessionRuntime(state, { type: "host-event", envelope: activity(3, { type: "turn-ended", evidence: "structured", outcome: conflict }) });
+      expect(rejected).toBe(state);
+      expect(rejected.cursorBySessionId.s).toBe(2);
+    }
+  });
+
+  it("accepts pending resolution after termination, rejects stale requests, then clears outcome for a new turn", () => {
+    let state = reduceSessionRuntime(createSessionRuntimeState([session()]), { type: "host-event", envelope: structuredOpened() });
+    state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(1, { type: "turn-started", evidence: "structured" }) });
+    state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(2, { type: "attention-requested", evidence: "structured", key: "approval" }) });
+    state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(3, { type: "turn-ended", evidence: "structured", outcome: "interrupted" }) });
+    const stale = reduceSessionRuntime(state, { type: "host-event", envelope: activity(4, { type: "attention-requested", evidence: "structured", key: "late" }) });
+    expect(stale).toBe(state);
+    state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(4, { type: "attention-resolved", evidence: "structured", key: "approval" }) });
+    state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(5, { type: "turn-started", evidence: "structured" }, otherTurn) });
+    expect(state.connectionBySessionId.s.terminalOutcome).toBeUndefined();
+    expect(state.sessions[0].status).toBe("working");
   });
 
   it("accepts the next provider turn after the previous result was reviewed locally", () => {
     let state = reduceSessionRuntime(createSessionRuntimeState([session({ status: "idle" })]), { type: "host-event", envelope: structuredOpened() });
     state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(1, { type: "turn-started", evidence: "structured" }) });
-    state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(2, { type: "turn-completed", evidence: "structured" }) });
+    state = reduceSessionRuntime(state, { type: "host-event", envelope: activity(2, { type: "turn-ended", evidence: "structured", outcome: "completed" }) });
     state = reduceSessionRuntime(state, { type: "review", sessionId: "s" });
     expect(state.sessions[0].status).toBe("idle");
 

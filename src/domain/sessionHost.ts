@@ -1,7 +1,7 @@
 import type { FirstClassAgentId } from "../agents/types";
 import type { ActivityEvent } from "./lifecycle";
 
-export const SESSION_HOST_PROTOCOL_VERSION = 2 as const;
+export const SESSION_HOST_PROTOCOL_VERSION = 3 as const;
 
 export type StructuredLifecycleIntegration = "app-server" | "hooks" | "rpc";
 export type StructuredSourceProvenance = "provider-event" | "provider-handshake";
