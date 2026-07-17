@@ -1,0 +1,56 @@
+# JavaScript dependencies and build output
+node_modules/
+dist/
+coverage/
+.vite/
+*.tsbuildinfo
+.npm/
+.eslintcache
+
+# Rust and Tauri build output
+src-tauri/target/
+target/
+src-tauri/gen/schemas/
+**/*.rs.bk
+
+# Environment files and local credentials
+.env
+.env.*
+!.env.example
+
+# Logs and process state
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.pid
+*.pid.lock
+
+# Editors
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+*~
+
+# Local agent configuration
+.claude/settings.local.json
+
+# Operating-system metadata
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+Thumbs.db
+Desktop.ini
+
+# Local caches and scratch directories
+/.cache/
+/.tmp/
+/tmp/
+/temp/
