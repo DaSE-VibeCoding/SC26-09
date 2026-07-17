@@ -34,14 +34,14 @@ import {
   getGitChanges,
   getGitDiff,
   isTauri,
+  listHostedSessions,
   listWorkspaceFiles,
-  listTerminalSessions,
-  onTerminalExit,
-  onTerminalOutput,
-  spawnTerminal,
-  stopTerminal,
-  writeTerminal,
+  onSessionEvent,
+  openSession,
+  sendSession,
+  stopSession as stopHostedSession,
 } from "./services/native";
+import { SESSION_HOST_PROTOCOL_VERSION, type SessionOpenRequest } from "./domain/sessionHost";
 import {
   loadSessions,
   loadWorkspaces,
@@ -71,6 +71,10 @@ function createId(): string {
 
 function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
+}
+
+function hostOpenRequest(session: AgentSession, workspacePath: string, executable: string, recovery: SessionOpenRequest["recovery"]): SessionOpenRequest {
+  return { protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId: session.id, agentId: session.agentId, workspacePath, title: session.title, transport: { type: "pty-fallback", executable }, terminalSize: { rows: 30, cols: 110 }, recovery };
 }
 
 function statusLabel(status: AgentSession["status"]): string {
@@ -248,11 +252,14 @@ export default function App() {
   const sessionDiscoveryInFlightRef = useRef(false);
   const createSessionInFlightRef = useRef(false);
   const discoveryErrorRef = useRef<string | null>(null);
+  const hostListenerReadyRef = useRef(false);
+  const refreshDiscoveredSessionsRef = useRef<(surfaceError?: boolean) => void | Promise<void>>(() => undefined);
   const statusFlushTimerRef = useRef<number | null>(null);
   const loadedWorkspaceIdRef = useRef<string | null>(null);
   const loadedDiffKeyRef = useRef<string | null>(null);
   const agentPickerRef = useDialogFocus<HTMLElement>(agentPickerOpen);
   const settingsRef = useDialogFocus<HTMLElement>(settingsOpen);
+  const connectionFor = (sessionId: string) => sessionRuntime.connectionBySessionId[sessionId];
 
   const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null;
   const activeSession = sessions.find((session) => (
@@ -308,7 +315,8 @@ export default function App() {
     );
     setDiscoveryCleanupPlan(null);
     cleanupIds.forEach((sessionId) => {
-      void stopTerminal(sessionId).catch(() => undefined);
+      const connection = connectionFor(sessionId);
+      if (connection) void stopHostedSession({ protocolVersion: 1, sessionId, streamId: connection.streamId }).catch(() => undefined);
       clearTerminalBuffer(sessionId);
     });
   }, [discoveryCleanupPlan, sessions]);
@@ -377,30 +385,19 @@ export default function App() {
         if (!cancelled) setAgentsLoading(false);
       });
     // Rejoin Pelican-owned PTYs that survived a webview reload (Rust host still live).
-    void listTerminalSessions()
-      .then((liveIds) => {
-        if (cancelled || liveIds.length === 0) return;
-        liveIds.forEach((sessionId) => initializeTerminalBuffer(sessionId));
-        setSessionRuntime((current) => liveIds.reduce((next, sessionId) => initializeRuntimeSession(
-          next,
-          sessionId,
-          (session) => ({ ...session, connected: true, running: true }),
-          next.lifecycleBySessionId[sessionId] ? "reuse-existing" : "seed-from-status",
-        ), current));
-      })
-      .catch(() => undefined);
     return () => { cancelled = true; };
   }, []);
 
   const refreshDiscoveredSessions = useCallback(async (surfaceError = true) => {
-    if (!isTauri() || workspaces.length === 0 || sessionDiscoveryInFlightRef.current) return;
+    if (!isTauri() || !hostListenerReadyRef.current || workspaces.length === 0 || sessionDiscoveryInFlightRef.current) return;
     sessionDiscoveryInFlightRef.current = true;
     setSessionsRefreshing(true);
     try {
-      const [discovered, liveIds] = await Promise.all([
+      const [discovered, hosted] = await Promise.all([
         discoverAgentSessions(workspaces.map((workspace) => workspace.path)),
-        listTerminalSessions().catch(() => [] as string[]),
+        listHostedSessions().catch(() => []),
       ]);
+      const liveIds = hosted.map((snapshot) => snapshot.sessionId);
       const now = new Date().toISOString();
       const allocatedSessionIds = discovered.map(() => createId());
       liveIds.forEach((sessionId) => initializeTerminalBuffer(sessionId));
@@ -412,10 +409,7 @@ export default function App() {
           allocatedSessionIdIndex += 1;
           return id;
         };
-        const reconnectedState = liveIds.reduce((next, sessionId) => initializeRuntimeSession(
-          next, sessionId, (session) => ({ ...session, connected: true, running: true }),
-          next.lifecycleBySessionId[sessionId] ? "reuse-existing" : "seed-from-status",
-        ), current);
+        const reconnectedState = hosted.reduce((next, snapshot) => reduceSessionRuntime(next, { type: "host-snapshot", snapshot }), current);
         const merged = mergeDiscoveredSessions(
           reconnectedState.sessions as AgentSession[],
           discovered,
@@ -438,6 +432,7 @@ export default function App() {
       setSessionsRefreshing(false);
     }
   }, [workspaces]);
+  refreshDiscoveredSessionsRef.current = refreshDiscoveredSessions;
 
   useEffect(() => {
     if (!isTauri() || workspaces.length === 0) return;
@@ -556,7 +551,31 @@ export default function App() {
     let cancelled = false;
     const disposers: Array<() => void> = [];
     void Promise.all([
-      onTerminalOutput((event) => {
+      onSessionEvent((envelope) => {
+        setSessionRuntime((current) => reduceSessionRuntime(current, { type: "host-event", envelope }));
+        if (envelope.event.type !== "terminal-output" && envelope.event.type !== "closed") return;
+        if (envelope.event.type === "closed") {
+          const exitEvent = envelope.event;
+          const event = { sessionId: envelope.sessionId, success: exitEvent.outcome.type === "stopped" ? false : exitEvent.outcome.success };
+          exitedSessionIdsRef.current.add(event.sessionId);
+          engagedSessionIdsRef.current.delete(event.sessionId);
+          agentOutputSeenRef.current.delete(event.sessionId);
+          const idleTimer = turnIdleTimersRef.current[event.sessionId];
+          if (idleTimer !== undefined) { window.clearTimeout(idleTimer); delete turnIdleTimersRef.current[event.sessionId]; }
+          const intentionallyStopped = stoppingSessionIdsRef.current.delete(event.sessionId) || exitEvent.outcome.type === "stopped";
+          const endedSession = sessionsRef.current.find((session) => session.id === event.sessionId);
+          notifiedAttentionRef.current.delete(event.sessionId);
+          setStoppingSessionIds((current) => { const next = new Set(current); next.delete(event.sessionId); return next; });
+          const unread = !intentionallyStopped && (event.sessionId !== activeSessionIdRef.current || document.visibilityState !== "visible" || !document.hasFocus());
+          const lastActivityAt = new Date().toISOString();
+          setSessionRuntime((current) => updateRuntimeSession(current, event.sessionId, (session) => ({ ...session, unread, lastActivityAt })));
+          if (!intentionallyStopped && endedSession && notificationsEnabledRef.current && (activeSessionIdRef.current !== event.sessionId || !document.hasFocus())) {
+            const agentName = getAgentAdapter(endedSession.agentId).displayName;
+            void notify(`${agentName} ${event.success ? "finished" : "exited with an error"}`, endedSession.title).catch(() => undefined);
+          }
+          return;
+        }
+        const event = { sessionId: envelope.sessionId, data: envelope.event.data };
         appendTerminalBuffer(event.sessionId, event.data);
         const attentionScan = scanTerminalAttention(attentionScanRef.current[event.sessionId] ?? "", event.data);
         const needsAttention = attentionScan.needsAttention;
@@ -640,65 +659,20 @@ export default function App() {
           }, 160);
         }
       }),
-      onTerminalExit((event) => {
-        exitedSessionIdsRef.current.add(event.sessionId);
-        engagedSessionIdsRef.current.delete(event.sessionId);
-        agentOutputSeenRef.current.delete(event.sessionId);
-        const idleTimer = turnIdleTimersRef.current[event.sessionId];
-        if (idleTimer !== undefined) {
-          window.clearTimeout(idleTimer);
-          delete turnIdleTimersRef.current[event.sessionId];
-        }
-        const intentionallyStopped = stoppingSessionIdsRef.current.delete(event.sessionId);
-        const endedSession = sessionsRef.current.find((session) => session.id === event.sessionId);
-        notifiedAttentionRef.current.delete(event.sessionId);
-        setStoppingSessionIds((current) => {
-          if (!current.has(event.sessionId)) return current;
-          const next = new Set(current);
-          next.delete(event.sessionId);
-          return next;
-        });
-        const lastActivityAt = new Date().toISOString();
-        const unreadOnExit = event.sessionId !== activeSessionIdRef.current
-          || document.visibilityState !== "visible"
-          || !document.hasFocus();
-        setSessionRuntime((current) => reduceSessionRuntime(
-          updateRuntimeSession(current, event.sessionId, (session) => ({
-            ...session,
-            status: intentionallyStopped
-              ? session.resumeHandle ? "available" : reduceSessionStatus(session.status, { type: "disconnected" })
-              : reduceSessionStatus(session.status, { type: "process-exited", success: event.success }),
-            connected: false,
-            running: false,
-            unread: intentionallyStopped
-              ? false
-              : unreadOnExit,
-            lastActivityAt,
-          })),
-          { type: "clear-lifecycle", sessionId: event.sessionId },
-        ));
-        if (
-          !intentionallyStopped
-          && endedSession
-          && notificationsEnabledRef.current
-          && (activeSessionIdRef.current !== event.sessionId || !document.hasFocus())
-        ) {
-          const agentName = getAgentAdapter(endedSession.agentId).displayName;
-          const outcome = event.success ? "finished" : "exited with an error";
-          void notify(`${agentName} ${outcome}`, endedSession.title).catch(() => undefined);
-        }
-      }),
     ]).then((nextDisposers) => {
       if (cancelled) {
         nextDisposers.forEach((dispose) => dispose());
       } else {
         disposers.push(...nextDisposers);
+        hostListenerReadyRef.current = true;
+        void refreshDiscoveredSessionsRef.current(true);
       }
     }).catch((reason: unknown) => {
       if (!cancelled) setError(`Could not monitor terminal sessions: ${errorMessage(reason)}`);
     });
     return () => {
       cancelled = true;
+      hostListenerReadyRef.current = false;
       disposers.forEach((dispose) => dispose());
       if (statusFlushTimerRef.current !== null) {
         window.clearTimeout(statusFlushTimerRef.current);
@@ -790,18 +764,8 @@ export default function App() {
       setMode("prompt");
 
       try {
-        await spawnTerminal({
-          sessionId: id,
-          cwd: activeWorkspace.path,
-          program: launch.program,
-          args: launch.args,
-          env: launch.env,
-          rows: 30,
-          cols: 110,
-        });
-        setSessionRuntime((current) => exitedSessionIdsRef.current.has(id) ? current : initializeRuntimeSession(
-          current, id, (candidate) => ({ ...candidate, connected: true, running: true }), "reuse-existing",
-        ));
+        const snapshot = await openSession(hostOpenRequest(session, activeWorkspace.path, launch.program, { type: "new" }), launch);
+        setSessionRuntime((current) => reduceSessionRuntime(current, { type: "host-snapshot", snapshot }));
         queueMicrotask(() => promptRef.current?.focus());
       } catch (reason) {
         setSessions((current) => current.filter((candidate) => candidate.id !== id));
@@ -858,30 +822,29 @@ export default function App() {
     setMode("terminal");
 
     try {
-      await spawnTerminal({
-        sessionId: target.id,
-        cwd: workspace.path,
-        program: launch.program,
-        args: launch.args,
-        env: launch.env,
-        rows: 30,
-        cols: 110,
-      });
-      setSessionRuntime((current) => initializeRuntimeSession(
-        current, target.id,
-        (session) => ({ ...session, connected: true, running: true, unread: false }),
-        attachSessionId ? "seed-from-status" : "fresh",
-      ));
+      const recovery: SessionOpenRequest["recovery"] = attachSessionId ? { type: "attach", handle: attachSessionId } : { type: "resume", handle: resumeSessionId! };
+      const snapshot = await openSession(hostOpenRequest(target, workspace.path, launch.program, recovery), launch);
+      setSessionRuntime((current) => reduceSessionRuntime(current, { type: "host-snapshot", snapshot }));
     } catch (reason) {
       const message = errorMessage(reason);
       // Webview reload leaves the Rust PTY alive; treat "already exists" as reconnect.
       if (/already exists/i.test(message)) {
-        initializeTerminalBuffer(target.id);
-        setSessionRuntime((current) => initializeRuntimeSession(
-          current, target.id,
-          (session) => ({ ...session, connected: true, running: true, unread: false }),
-          "seed-from-status",
-        ));
+        const snapshot = await listHostedSessions()
+          .then((hosted) => hosted.find((candidate) => candidate.sessionId === target.id))
+          .catch(() => undefined);
+        if (snapshot) {
+          initializeTerminalBuffer(target.id);
+          setSessionRuntime((current) => reduceSessionRuntime(
+            updateRuntimeSession(current, target.id, (session) => ({ ...session, unread: false })),
+            { type: "host-snapshot", snapshot },
+          ));
+        } else {
+          setSessionRuntime((current) => reduceSessionRuntime(
+            updateRuntimeSession(current, target.id, () => previous),
+            { type: "clear-lifecycle", sessionId: target.id },
+          ));
+          setError(`Could not reconnect to ${adapter.displayName}: the existing session stream is unavailable.`);
+        }
       } else {
         setSessionRuntime((current) => reduceSessionRuntime(
           updateRuntimeSession(current, target.id, () => previous),
@@ -925,13 +888,14 @@ export default function App() {
       if (activeSession.agentId === "codex") {
         // Write the line and the Enter separately. A single bulk `text\r` often
         // lands in Codex's composer without submitting until a later Enter.
-        await writeTerminal(
-          sessionId,
-          multiline ? `\x1b[200~${submittedPrompt}\x1b[201~` : submittedPrompt,
-        );
-        await writeTerminal(sessionId, "\r");
+        const streamId = connectionFor(sessionId)?.streamId;
+        if (!streamId) throw new Error("Session stream is unavailable");
+        await sendSession({ protocolVersion: 1, sessionId, streamId, input: { type: "terminal", data: multiline ? `\x1b[200~${submittedPrompt}\x1b[201~` : submittedPrompt } });
+        await sendSession({ protocolVersion: 1, sessionId, streamId, input: { type: "terminal", data: "\r" } });
       } else {
-        await writeTerminal(sessionId, data);
+        const streamId = connectionFor(sessionId)?.streamId;
+        if (!streamId) throw new Error("Session stream is unavailable");
+        await sendSession({ protocolVersion: 1, sessionId, streamId, input: { type: "terminal", data } });
       }
       engagedSessionIdsRef.current.add(sessionId);
       agentOutputSeenRef.current.delete(sessionId);
@@ -981,7 +945,9 @@ export default function App() {
     stoppingSessionIdsRef.current.add(activeSession.id);
     setStoppingSessionIds((current) => new Set(current).add(activeSession.id));
     try {
-      await stopTerminal(activeSession.id);
+      const streamId = connectionFor(activeSession.id)?.streamId;
+      if (!streamId) throw new Error("Session stream is unavailable");
+      await stopHostedSession({ protocolVersion: 1, sessionId: activeSession.id, streamId });
       setSessionRuntime((current) => reduceSessionRuntime(
         updateRuntimeSession(current, activeSession.id, (session) => ({
           ...session, connected: false, running: false,
@@ -1277,6 +1243,7 @@ export default function App() {
               {activeSession.connected && (
                 <TerminalView
                   sessionId={activeSession.id}
+                  streamId={connectionFor(activeSession.id)?.streamId ?? ""}
                   visible={mode === "terminal"}
                   interactive={mode === "terminal" && !activeSessionStarting && !activeSessionStopping}
                   onInput={handleTerminalInput}

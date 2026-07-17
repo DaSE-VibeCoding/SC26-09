@@ -87,6 +87,11 @@ export function reduceSessionRuntime(state: SessionRuntimeState, action: Session
       const { snapshot } = action;
       const session = find(state, snapshot.sessionId);
       if (!session) return state;
+      const connection = state.connectionBySessionId[snapshot.sessionId];
+      if (connection?.streamId === snapshot.streamId) {
+        const cursor = state.cursorBySessionId[snapshot.sessionId] ?? -1;
+        if (!connection.open || snapshot.lastSequence < cursor) return state;
+      }
       const connectedState = replaceSessionConnection(state, session, true, true);
       return {
         ...connectedState,

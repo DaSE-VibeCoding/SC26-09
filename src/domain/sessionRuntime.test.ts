@@ -92,4 +92,16 @@ describe("session runtime reducer", () => {
     expect(replay()).toEqual(replay());
     expect(initial.connectionBySessionId).toEqual({});
   });
+
+  it("does not let stale same-stream snapshots regress or reopen", () => {
+    let state = reduceSessionRuntime(createSessionRuntimeState([session()]), { type: "host-event", envelope: opened() });
+    state = reduceSessionRuntime(state, { type: "host-event", envelope: envelope(4, { type: "terminal-output", data: "new" }) });
+    const current = state;
+    state = reduceSessionRuntime(state, { type: "host-snapshot", snapshot: { protocolVersion: 1, sessionId: "s", streamId: "stream-1", lastSequence: 2, transport: { type: "pty", lifecycleEvidence: "fallback" } } });
+    expect(state).toBe(current);
+    state = reduceSessionRuntime(state, { type: "host-event", envelope: envelope(5, { type: "closed", outcome: { type: "exited", success: true } }) });
+    const closed = state;
+    state = reduceSessionRuntime(state, { type: "host-snapshot", snapshot: { protocolVersion: 1, sessionId: "s", streamId: "stream-1", lastSequence: 5, transport: { type: "pty", lifecycleEvidence: "fallback" } } });
+    expect(state).toBe(closed);
+  });
 });
