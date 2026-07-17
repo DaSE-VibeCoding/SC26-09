@@ -1,11 +1,32 @@
 import type { FirstClassAgentId } from "../agents/types";
 import type { ActivityEvent } from "./lifecycle";
 
-export const SESSION_HOST_PROTOCOL_VERSION = 1 as const;
+export const SESSION_HOST_PROTOCOL_VERSION = 2 as const;
+
+export type StructuredLifecycleIntegration = "app-server" | "hooks" | "rpc";
+export type StructuredSourceProvenance = "provider-event" | "provider-handshake";
+export type StructuredTurnProvenance = "provider-turn" | "provider-prompt" | "adapter-stream";
+
+export interface StructuredLifecycleSource {
+  readonly agentId: FirstClassAgentId;
+  readonly integration: StructuredLifecycleIntegration;
+  readonly providerSessionId: string;
+  readonly provenance: StructuredSourceProvenance;
+}
+
+export interface StructuredTurnIdentity {
+  readonly key: string;
+  readonly provenance: StructuredTurnProvenance;
+}
+
+export interface StructuredActivityContext {
+  readonly turn: StructuredTurnIdentity;
+}
 
 export type SessionTransportDescriptor =
-  | { type: "pty"; lifecycleEvidence: "fallback" | "structured" }
-  | { type: "protocol"; lifecycleEvidence: "structured" };
+  | { type: "pty"; lifecycleEvidence: "fallback" }
+  | { type: "pty"; lifecycleEvidence: "structured"; source: StructuredLifecycleSource }
+  | { type: "protocol"; lifecycleEvidence: "structured"; source: StructuredLifecycleSource };
 
 export function hasInteractiveTerminal(transport: SessionTransportDescriptor): boolean {
   return transport.type === "pty";
@@ -74,11 +95,18 @@ export type SessionCloseOutcome =
   | { type: "stopped" }
   | { type: "exited"; success: boolean };
 
-export type TransportActivityEvent = Exclude<ActivityEvent, { type: "result-reviewed" }>;
+export type TransportActivityEvent = Exclude<ActivityEvent, { type: "result-reviewed" }> & {
+  evidence: "structured";
+};
 
 export type SessionHostEvent =
   | { type: "opened"; transport: SessionTransportDescriptor }
-  | { type: "activity"; activity: TransportActivityEvent }
+  | {
+    type: "activity";
+    source: StructuredLifecycleSource;
+    context: StructuredActivityContext;
+    activity: TransportActivityEvent;
+  }
   | { type: "terminal-output"; data: string }
   | { type: "closed"; outcome: SessionCloseOutcome };
 

@@ -1,14 +1,15 @@
 use crate::terminal::{self, PtyEvent, PtyHandle, PtySpawnSpec, PtyStopWait, PtyStopper};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const MAX_ID: usize = 256;
+const MAX_ACTIVITY_KEY: usize = 512;
 const MAX_TEXT: usize = 4096;
 const MAX_ARGS: usize = 1024;
 const MAX_ENV: usize = 256;
@@ -20,15 +21,31 @@ pub struct SessionHost {
 }
 enum HostedEntry {
     Opening,
-    Bound(HostedBinding),
+    Bound(Box<HostedBinding>),
 }
 struct HostedBinding {
-    stream_id: String,
-    sequence: u64,
+    stream: StreamState,
     pty: Arc<Mutex<PtyHandle>>,
     stopper: PtyStopper,
     stop_accepted: bool,
     legacy: bool,
+}
+
+struct StreamState {
+    agent_id: String,
+    stream_id: String,
+    sequence: u64,
+    transport_kind: BindingTransport,
+    source: Option<SourceIdentity>,
+    current_turn: Option<TurnIdentity>,
+    pending_attention_keys: HashSet<String>,
+    turn_completed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BindingTransport {
+    Pty,
+    Protocol,
 }
 
 #[derive(Deserialize)]
@@ -92,7 +109,110 @@ pub struct HostedSessionSnapshot {
     rename_all_fields = "camelCase"
 )]
 enum Transport {
-    Pty { lifecycle_evidence: String },
+    Pty {
+        lifecycle_evidence: LifecycleEvidence,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source: Option<SourceIdentity>,
+    },
+    Protocol {
+        lifecycle_evidence: LifecycleEvidence,
+        source: SourceIdentity,
+    },
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum LifecycleEvidence {
+    Fallback,
+    Structured,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum SourceIntegration {
+    AppServer,
+    Hooks,
+    Rpc,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[allow(dead_code)]
+enum SourceProvenance {
+    ProviderEvent,
+    ProviderHandshake,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceIdentity {
+    agent_id: String,
+    integration: SourceIntegration,
+    provider_session_id: String,
+    provenance: SourceProvenance,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[allow(dead_code)]
+enum TurnProvenance {
+    ProviderTurn,
+    ProviderPrompt,
+    AdapterStream,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TurnIdentity {
+    key: String,
+    provenance: TurnProvenance,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActivityContext {
+    turn: TurnIdentity,
+}
+#[derive(Clone, Serialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+#[allow(dead_code)]
+enum CandidateActivity {
+    TurnStarted {
+        evidence: LifecycleEvidence,
+    },
+    AttentionRequested {
+        evidence: LifecycleEvidence,
+        key: String,
+    },
+    AttentionResolved {
+        evidence: LifecycleEvidence,
+        key: String,
+    },
+    TurnCompleted {
+        evidence: LifecycleEvidence,
+    },
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum StructuredEvidence {
+    Structured,
+}
+#[derive(Clone, Serialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+enum HostActivity {
+    TurnStarted {
+        evidence: StructuredEvidence,
+    },
+    AttentionRequested {
+        evidence: StructuredEvidence,
+        key: String,
+    },
+    AttentionResolved {
+        evidence: StructuredEvidence,
+        key: String,
+    },
+    TurnCompleted {
+        evidence: StructuredEvidence,
+    },
+}
+#[derive(Clone)]
+struct StructuredActivityInput {
+    source: SourceIdentity,
+    context: ActivityContext,
+    activity: CandidateActivity,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,9 +226,20 @@ struct Envelope {
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 enum HostEvent {
-    Opened { transport: Transport },
-    TerminalOutput { data: String },
-    Closed { outcome: CloseOutcome },
+    Opened {
+        transport: Transport,
+    },
+    Activity {
+        source: SourceIdentity,
+        context: ActivityContext,
+        activity: HostActivity,
+    },
+    TerminalOutput {
+        data: String,
+    },
+    Closed {
+        outcome: CloseOutcome,
+    },
 }
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -263,12 +394,21 @@ fn open(
     };
     let stream_id = format!("stream-{}", NEXT_STREAM.fetch_add(1, Ordering::Relaxed));
     let transport = Transport::Pty {
-        lifecycle_evidence: "fallback".into(),
+        lifecycle_evidence: LifecycleEvidence::Fallback,
+        source: None,
     };
     let stopper = pty.stopper();
     let binding = HostedBinding {
-        stream_id: stream_id.clone(),
-        sequence: 0,
+        stream: StreamState {
+            agent_id: r.agent_id.clone(),
+            stream_id: stream_id.clone(),
+            sequence: 0,
+            transport_kind: BindingTransport::Pty,
+            source: None,
+            current_turn: None,
+            pending_attention_keys: HashSet::new(),
+            turn_completed: false,
+        },
         pty: Arc::new(Mutex::new(pty)),
         stopper,
         stop_accepted: false,
@@ -330,7 +470,8 @@ fn install_reserved_binding(
     bindings: &Mutex<HashMap<String, HostedEntry>>,
     session_id: &str,
     binding: HostedBinding,
-) -> Result<(), (HostedBinding, String)> {
+) -> Result<(), (Box<HostedBinding>, String)> {
+    let binding = Box::new(binding);
     let mut map = match bindings.lock() {
         Ok(map) => map,
         Err(_) => return Err((binding, "Session host is unavailable".into())),
@@ -342,11 +483,30 @@ fn install_reserved_binding(
     Ok(())
 }
 
-fn cleanup_spawned_binding(binding: HostedBinding) {
+fn cleanup_spawned_binding(binding: Box<HostedBinding>) {
     if let Ok(wait) = binding.stopper.request_stop() {
         let _ = wait.wait();
     }
 }
+
+fn transport_for_stream(stream: &StreamState) -> Option<Transport> {
+    match (&stream.transport_kind, &stream.source) {
+        (BindingTransport::Pty, None) => Some(Transport::Pty {
+            lifecycle_evidence: LifecycleEvidence::Fallback,
+            source: None,
+        }),
+        (BindingTransport::Pty, Some(source)) => Some(Transport::Pty {
+            lifecycle_evidence: LifecycleEvidence::Structured,
+            source: Some(source.clone()),
+        }),
+        (BindingTransport::Protocol, Some(source)) => Some(Transport::Protocol {
+            lifecycle_evidence: LifecycleEvidence::Structured,
+            source: source.clone(),
+        }),
+        (BindingTransport::Protocol, None) => None,
+    }
+}
+
 fn publish_pty_event(app: &AppHandle, session_id: &str, stream_id: &str, event: PtyEvent) {
     let Some(publication) = build_publication(app, session_id, stream_id, event) else {
         return;
@@ -397,11 +557,11 @@ fn build_publication(
     let Some(HostedEntry::Bound(binding)) = map.get_mut(session_id) else {
         return None;
     };
-    if binding.stream_id != stream_id {
+    if binding.stream.stream_id != stream_id {
         return None;
     };
-    binding.sequence += 1;
-    let sequence = binding.sequence;
+    binding.stream.sequence += 1;
+    let sequence = binding.stream.sequence;
     let legacy = binding.legacy;
     let (host_event, legacy_output, legacy_exit, final_event) = match event {
         PtyEvent::Output(data) => (
@@ -448,7 +608,7 @@ fn remove_closed_binding(app: &AppHandle, session_id: &str, stream_id: &str) {
     };
     if matches!(
         map.get(session_id),
-        Some(HostedEntry::Bound(binding)) if binding.stream_id == stream_id
+        Some(HostedEntry::Bound(binding)) if binding.stream.stream_id == stream_id
     ) {
         map.remove(session_id);
     }
@@ -528,15 +688,15 @@ pub fn session_list(host: State<'_, SessionHost>) -> Result<Vec<HostedSessionSna
         .iter()
         .filter_map(|(id, entry)| match entry {
             HostedEntry::Opening => None,
-            HostedEntry::Bound(b) if !b.legacy => Some(HostedSessionSnapshot {
-                protocol_version: VERSION,
-                session_id: id.clone(),
-                stream_id: b.stream_id.clone(),
-                last_sequence: b.sequence,
-                transport: Transport::Pty {
-                    lifecycle_evidence: "fallback".into(),
-                },
-            }),
+            HostedEntry::Bound(b) if !b.legacy => {
+                transport_for_stream(&b.stream).map(|transport| HostedSessionSnapshot {
+                    protocol_version: VERSION,
+                    session_id: id.clone(),
+                    stream_id: b.stream.stream_id.clone(),
+                    last_sequence: b.stream.sequence,
+                    transport,
+                })
+            }
             HostedEntry::Bound(_) => None,
         })
         .collect())
@@ -548,6 +708,205 @@ fn check_version(v: u8) -> Result<(), String> {
         Err("Unsupported session protocol version".into())
     }
 }
+
+fn expected_integration(agent_id: &str) -> Option<SourceIntegration> {
+    match agent_id {
+        "codex" => Some(SourceIntegration::AppServer),
+        "claude-code" => Some(SourceIntegration::Hooks),
+        "pi" => Some(SourceIntegration::Rpc),
+        _ => None,
+    }
+}
+
+fn expected_structured_transport(agent_id: &str) -> Option<BindingTransport> {
+    match agent_id {
+        "codex" | "pi" => Some(BindingTransport::Protocol),
+        "claude-code" => Some(BindingTransport::Pty),
+        _ => None,
+    }
+}
+
+#[allow(dead_code)]
+fn accept_structured_activity(
+    session_id: &str,
+    stream: &mut StreamState,
+    input: StructuredActivityInput,
+) -> Result<Envelope, String> {
+    validate_identity(session_id, "Session ID")?;
+    validate_structured_input(&input)?;
+    validate_structured_binding(stream, &input.source)?;
+    validate_activity_order(stream, &input)?;
+
+    match &input.activity {
+        CandidateActivity::TurnStarted { .. } => {
+            stream.current_turn = Some(input.context.turn.clone());
+            stream.pending_attention_keys.clear();
+            stream.turn_completed = false;
+        }
+        CandidateActivity::AttentionRequested { key, .. } => {
+            stream.pending_attention_keys.insert(key.clone());
+        }
+        CandidateActivity::AttentionResolved { key, .. } => {
+            stream.pending_attention_keys.remove(key);
+        }
+        CandidateActivity::TurnCompleted { .. } => {
+            stream.turn_completed = true;
+        }
+    }
+
+    stream.sequence += 1;
+    Ok(Envelope {
+        protocol_version: VERSION,
+        session_id: session_id.into(),
+        stream_id: stream.stream_id.clone(),
+        sequence: stream.sequence,
+        event: HostEvent::Activity {
+            source: input.source,
+            context: input.context,
+            activity: host_activity(input.activity),
+        },
+    })
+}
+
+fn host_activity(activity: CandidateActivity) -> HostActivity {
+    match activity {
+        CandidateActivity::TurnStarted { .. } => HostActivity::TurnStarted {
+            evidence: StructuredEvidence::Structured,
+        },
+        CandidateActivity::AttentionRequested { key, .. } => HostActivity::AttentionRequested {
+            evidence: StructuredEvidence::Structured,
+            key,
+        },
+        CandidateActivity::AttentionResolved { key, .. } => HostActivity::AttentionResolved {
+            evidence: StructuredEvidence::Structured,
+            key,
+        },
+        CandidateActivity::TurnCompleted { .. } => HostActivity::TurnCompleted {
+            evidence: StructuredEvidence::Structured,
+        },
+    }
+}
+
+fn validate_structured_input(input: &StructuredActivityInput) -> Result<(), String> {
+    validate_identity(&input.source.agent_id, "Source agent ID")?;
+    validate_identity(&input.source.provider_session_id, "Provider session ID")?;
+    validate_activity_key(&input.context.turn.key, "Turn key")?;
+    if activity_evidence(&input.activity) != &LifecycleEvidence::Structured {
+        return Err("Host activity evidence must be structured".into());
+    }
+    if let Some(key) = activity_attention_key(&input.activity) {
+        validate_activity_key(key, "Attention key")?;
+    }
+    Ok(())
+}
+
+fn validate_structured_binding(
+    stream: &StreamState,
+    source: &SourceIdentity,
+) -> Result<(), String> {
+    let Some(bound_source) = &stream.source else {
+        return Err("Structured activity requires a structured source binding".into());
+    };
+    if stream.agent_id != source.agent_id || bound_source.agent_id != source.agent_id {
+        return Err("Structured activity source agent does not match binding".into());
+    }
+    let Some(expected_integration) = expected_integration(&stream.agent_id) else {
+        return Err("Structured activity source agent is unsupported".into());
+    };
+    if source.integration != expected_integration || bound_source.integration != source.integration
+    {
+        return Err("Structured activity source integration does not match binding".into());
+    }
+    let Some(expected_transport) = expected_structured_transport(&stream.agent_id) else {
+        return Err("Structured activity transport is unsupported".into());
+    };
+    if stream.transport_kind != expected_transport {
+        return Err("Structured activity transport does not match source integration".into());
+    }
+    if bound_source.provider_session_id != source.provider_session_id {
+        return Err("Structured activity provider session does not match binding".into());
+    }
+    Ok(())
+}
+
+fn validate_activity_order(
+    stream: &StreamState,
+    input: &StructuredActivityInput,
+) -> Result<(), String> {
+    let turn = &input.context.turn;
+    match &input.activity {
+        CandidateActivity::TurnStarted { .. } => {
+            if let Some(current_turn) = &stream.current_turn {
+                if current_turn == turn {
+                    return Err("Duplicate structured turn start".into());
+                }
+                if !stream.turn_completed || !stream.pending_attention_keys.is_empty() {
+                    return Err("Structured turn start is out of order".into());
+                }
+            }
+        }
+        CandidateActivity::AttentionRequested { key, .. } => {
+            require_current_turn(stream, turn)?;
+            if stream.turn_completed {
+                return Err("Structured attention request is stale".into());
+            }
+            if stream.pending_attention_keys.contains(key) {
+                return Err("Duplicate structured attention request".into());
+            }
+        }
+        CandidateActivity::AttentionResolved { key, .. } => {
+            require_current_turn(stream, turn)?;
+            if !stream.pending_attention_keys.contains(key) {
+                return Err("Structured attention resolution is uncorrelated".into());
+            }
+        }
+        CandidateActivity::TurnCompleted { .. } => {
+            require_current_turn(stream, turn)?;
+            if stream.turn_completed {
+                return Err("Duplicate structured turn completion".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn require_current_turn(stream: &StreamState, turn: &TurnIdentity) -> Result<(), String> {
+    match &stream.current_turn {
+        Some(current) if current == turn => Ok(()),
+        Some(_) => Err("Structured activity turn does not match current turn".into()),
+        None => Err("Structured activity arrived before turn establishment".into()),
+    }
+}
+
+fn activity_evidence(activity: &CandidateActivity) -> &LifecycleEvidence {
+    match activity {
+        CandidateActivity::TurnStarted { evidence }
+        | CandidateActivity::TurnCompleted { evidence }
+        | CandidateActivity::AttentionRequested { evidence, .. }
+        | CandidateActivity::AttentionResolved { evidence, .. } => evidence,
+    }
+}
+
+fn activity_attention_key(activity: &CandidateActivity) -> Option<&str> {
+    match activity {
+        CandidateActivity::AttentionRequested { key, .. }
+        | CandidateActivity::AttentionResolved { key, .. } => Some(key),
+        CandidateActivity::TurnStarted { .. } | CandidateActivity::TurnCompleted { .. } => None,
+    }
+}
+
+fn validate_activity_key(value: &str, label: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.encode_utf16().count() > MAX_ACTIVITY_KEY
+        || value.contains('\0')
+        || value.chars().any(char::is_control)
+    {
+        Err(format!("{label} is invalid"))
+    } else {
+        Ok(())
+    }
+}
+
 fn bound_binding_mut<'a>(
     map: &'a mut HashMap<String, HostedEntry>,
     id: &str,
@@ -556,7 +915,7 @@ fn bound_binding_mut<'a>(
     let Some(HostedEntry::Bound(b)) = map.get_mut(id) else {
         return Err("Session is not running".into());
     };
-    if b.stream_id != stream {
+    if b.stream.stream_id != stream {
         return Err("Session stream is stale".into());
     }
     Ok(b)
@@ -744,21 +1103,131 @@ mod tests {
         }
     }
 
+    fn source(
+        agent_id: &str,
+        integration: SourceIntegration,
+        provider_session_id: &str,
+        provenance: SourceProvenance,
+    ) -> SourceIdentity {
+        SourceIdentity {
+            agent_id: agent_id.into(),
+            integration,
+            provider_session_id: provider_session_id.into(),
+            provenance,
+        }
+    }
+
+    fn turn(key: &str) -> TurnIdentity {
+        TurnIdentity {
+            key: key.into(),
+            provenance: TurnProvenance::ProviderTurn,
+        }
+    }
+
+    fn stream_state(
+        agent_id: &str,
+        transport_kind: BindingTransport,
+        source: Option<SourceIdentity>,
+    ) -> StreamState {
+        StreamState {
+            agent_id: agent_id.into(),
+            stream_id: "stream-1".into(),
+            sequence: 0,
+            transport_kind,
+            source,
+            current_turn: None,
+            pending_attention_keys: HashSet::new(),
+            turn_completed: false,
+        }
+    }
+
+    fn input(
+        source: SourceIdentity,
+        turn: TurnIdentity,
+        activity: CandidateActivity,
+    ) -> StructuredActivityInput {
+        StructuredActivityInput {
+            source,
+            context: ActivityContext { turn },
+            activity,
+        }
+    }
+
+    fn turn_started() -> CandidateActivity {
+        CandidateActivity::TurnStarted {
+            evidence: LifecycleEvidence::Structured,
+        }
+    }
+
+    fn turn_completed() -> CandidateActivity {
+        CandidateActivity::TurnCompleted {
+            evidence: LifecycleEvidence::Structured,
+        }
+    }
+
+    fn attention_requested(key: &str) -> CandidateActivity {
+        CandidateActivity::AttentionRequested {
+            evidence: LifecycleEvidence::Structured,
+            key: key.into(),
+        }
+    }
+
+    fn attention_resolved(key: &str) -> CandidateActivity {
+        CandidateActivity::AttentionResolved {
+            evidence: LifecycleEvidence::Structured,
+            key: key.into(),
+        }
+    }
+
     #[test]
-    fn serialization_matches_v1() {
+    fn serialization_matches_v2() {
         let value = serde_json::to_value(HostedSessionSnapshot {
-            protocol_version: 1,
+            protocol_version: VERSION,
             session_id: "s".into(),
             stream_id: "stream-1".into(),
             last_sequence: 0,
             transport: Transport::Pty {
-                lifecycle_evidence: "fallback".into(),
+                lifecycle_evidence: LifecycleEvidence::Fallback,
+                source: None,
             },
         })
         .unwrap();
-        assert_eq!(value["protocolVersion"], 1);
+        assert_eq!(value["protocolVersion"], 2);
         assert_eq!(value["transport"]["type"], "pty");
         assert_eq!(value["transport"]["lifecycleEvidence"], "fallback");
+        assert!(value["transport"].get("source").is_none());
+
+        let structured = serde_json::to_value(HostedSessionSnapshot {
+            protocol_version: VERSION,
+            session_id: "s".into(),
+            stream_id: "stream-1".into(),
+            last_sequence: 1,
+            transport: Transport::Protocol {
+                lifecycle_evidence: LifecycleEvidence::Structured,
+                source: source(
+                    "codex",
+                    SourceIntegration::AppServer,
+                    "codex-thread-1",
+                    SourceProvenance::ProviderHandshake,
+                ),
+            },
+        })
+        .unwrap();
+        assert_eq!(structured["transport"]["type"], "protocol");
+        assert_eq!(structured["transport"]["lifecycleEvidence"], "structured");
+        assert_eq!(structured["transport"]["source"]["agentId"], "codex");
+        assert_eq!(
+            structured["transport"]["source"]["integration"],
+            "app-server"
+        );
+        assert_eq!(
+            structured["transport"]["source"]["providerSessionId"],
+            "codex-thread-1"
+        );
+        assert_eq!(
+            structured["transport"]["source"]["provenance"],
+            "provider-handshake"
+        );
     }
 
     #[test]
@@ -781,5 +1250,310 @@ mod tests {
 
         clear_opening(&host.bindings, "session-1");
         assert!(reserve_session_id(&host.bindings, "session-1").is_ok());
+    }
+
+    #[test]
+    fn structured_gate_accepts_valid_codex_claude_and_pi_identity_modes() {
+        let cases = [
+            (
+                "codex",
+                SourceIntegration::AppServer,
+                BindingTransport::Protocol,
+                "codex-thread",
+            ),
+            (
+                "claude-code",
+                SourceIntegration::Hooks,
+                BindingTransport::Pty,
+                "claude-session",
+            ),
+            (
+                "pi",
+                SourceIntegration::Rpc,
+                BindingTransport::Protocol,
+                "pi-session",
+            ),
+        ];
+
+        for (agent_id, integration, transport, provider_session_id) in cases {
+            let bound_source = source(
+                agent_id,
+                integration.clone(),
+                provider_session_id,
+                SourceProvenance::ProviderHandshake,
+            );
+            let event_source = source(
+                agent_id,
+                integration,
+                provider_session_id,
+                SourceProvenance::ProviderEvent,
+            );
+            let mut stream = stream_state(agent_id, transport, Some(bound_source));
+
+            let envelope = accept_structured_activity(
+                "session-1",
+                &mut stream,
+                input(event_source, turn("turn-1"), turn_started()),
+            )
+            .expect("valid structured activity");
+
+            assert_eq!(envelope.protocol_version, VERSION);
+            assert_eq!(envelope.sequence, 1);
+            assert_eq!(stream.sequence, 1);
+            assert_eq!(stream.current_turn, Some(turn("turn-1")));
+        }
+    }
+
+    #[test]
+    fn structured_gate_rejects_wrong_source_session_integration_and_turn_without_sequence() {
+        let bound_source = source(
+            "codex",
+            SourceIntegration::AppServer,
+            "codex-thread",
+            SourceProvenance::ProviderHandshake,
+        );
+        let event_source = source(
+            "codex",
+            SourceIntegration::AppServer,
+            "codex-thread",
+            SourceProvenance::ProviderEvent,
+        );
+        let mut stream = stream_state("codex", BindingTransport::Protocol, Some(bound_source));
+
+        assert!(accept_structured_activity(
+            "session-1",
+            &mut stream,
+            input(
+                source(
+                    "pi",
+                    SourceIntegration::Rpc,
+                    "codex-thread",
+                    SourceProvenance::ProviderEvent,
+                ),
+                turn("turn-1"),
+                turn_started(),
+            ),
+        )
+        .is_err());
+        assert_eq!(stream.sequence, 0);
+
+        assert!(accept_structured_activity(
+            "session-1",
+            &mut stream,
+            input(
+                source(
+                    "codex",
+                    SourceIntegration::AppServer,
+                    "other-thread",
+                    SourceProvenance::ProviderEvent,
+                ),
+                turn("turn-1"),
+                turn_started(),
+            ),
+        )
+        .is_err());
+        assert_eq!(stream.sequence, 0);
+
+        assert!(accept_structured_activity(
+            "session-1",
+            &mut stream,
+            input(
+                source(
+                    "codex",
+                    SourceIntegration::Hooks,
+                    "codex-thread",
+                    SourceProvenance::ProviderEvent,
+                ),
+                turn("turn-1"),
+                turn_started(),
+            ),
+        )
+        .is_err());
+        assert_eq!(stream.sequence, 0);
+
+        accept_structured_activity(
+            "session-1",
+            &mut stream,
+            input(event_source.clone(), turn("turn-1"), turn_started()),
+        )
+        .expect("turn starts");
+        assert_eq!(stream.sequence, 1);
+
+        assert!(accept_structured_activity(
+            "session-1",
+            &mut stream,
+            input(event_source, turn("turn-2"), turn_completed()),
+        )
+        .is_err());
+        assert_eq!(stream.sequence, 1);
+    }
+
+    #[test]
+    fn structured_gate_rejects_fallback_binding_and_fallback_evidence_without_sequence() {
+        let event_source = source(
+            "codex",
+            SourceIntegration::AppServer,
+            "codex-thread",
+            SourceProvenance::ProviderEvent,
+        );
+        let mut fallback = stream_state("codex", BindingTransport::Pty, None);
+        assert!(accept_structured_activity(
+            "session-1",
+            &mut fallback,
+            input(event_source.clone(), turn("turn-1"), turn_started()),
+        )
+        .is_err());
+        assert_eq!(fallback.sequence, 0);
+
+        let bound_source = source(
+            "codex",
+            SourceIntegration::AppServer,
+            "codex-thread",
+            SourceProvenance::ProviderHandshake,
+        );
+        let mut structured = stream_state("codex", BindingTransport::Protocol, Some(bound_source));
+        assert!(accept_structured_activity(
+            "session-1",
+            &mut structured,
+            input(
+                event_source,
+                turn("turn-1"),
+                CandidateActivity::TurnStarted {
+                    evidence: LifecycleEvidence::Fallback,
+                },
+            ),
+        )
+        .is_err());
+        assert_eq!(structured.sequence, 0);
+    }
+
+    #[test]
+    fn structured_gate_correlates_attention_completion_and_new_turn_order() {
+        let bound_source = source(
+            "codex",
+            SourceIntegration::AppServer,
+            "codex-thread",
+            SourceProvenance::ProviderHandshake,
+        );
+        let event_source = source(
+            "codex",
+            SourceIntegration::AppServer,
+            "codex-thread",
+            SourceProvenance::ProviderEvent,
+        );
+        let mut stream = stream_state("codex", BindingTransport::Protocol, Some(bound_source));
+
+        assert!(accept_structured_activity(
+            "session-1",
+            &mut stream,
+            input(event_source.clone(), turn("turn-1"), turn_completed()),
+        )
+        .is_err());
+        assert_eq!(stream.sequence, 0);
+
+        accept_structured_activity(
+            "session-1",
+            &mut stream,
+            input(event_source.clone(), turn("turn-1"), turn_started()),
+        )
+        .expect("turn start accepted");
+        assert_eq!(stream.sequence, 1);
+
+        assert!(accept_structured_activity(
+            "session-1",
+            &mut stream,
+            input(event_source.clone(), turn("turn-1"), turn_started()),
+        )
+        .is_err());
+        assert_eq!(stream.sequence, 1);
+
+        accept_structured_activity(
+            "session-1",
+            &mut stream,
+            input(
+                event_source.clone(),
+                turn("turn-1"),
+                attention_requested("approval-1"),
+            ),
+        )
+        .expect("attention request accepted");
+        assert_eq!(stream.sequence, 2);
+
+        assert!(accept_structured_activity(
+            "session-1",
+            &mut stream,
+            input(
+                event_source.clone(),
+                turn("turn-1"),
+                attention_requested("approval-1")
+            ),
+        )
+        .is_err());
+        assert_eq!(stream.sequence, 2);
+
+        assert!(accept_structured_activity(
+            "session-1",
+            &mut stream,
+            input(
+                event_source.clone(),
+                turn("turn-1"),
+                attention_resolved("unknown")
+            ),
+        )
+        .is_err());
+        assert_eq!(stream.sequence, 2);
+
+        accept_structured_activity(
+            "session-1",
+            &mut stream,
+            input(event_source.clone(), turn("turn-1"), turn_completed()),
+        )
+        .expect("completion accepted while attention remains pending");
+        assert_eq!(stream.sequence, 3);
+        assert!(stream.turn_completed);
+
+        assert!(accept_structured_activity(
+            "session-1",
+            &mut stream,
+            input(event_source.clone(), turn("turn-1"), turn_completed()),
+        )
+        .is_err());
+        assert_eq!(stream.sequence, 3);
+
+        assert!(accept_structured_activity(
+            "session-1",
+            &mut stream,
+            input(event_source.clone(), turn("turn-2"), turn_started()),
+        )
+        .is_err());
+        assert_eq!(stream.sequence, 3);
+
+        accept_structured_activity(
+            "session-1",
+            &mut stream,
+            input(
+                event_source.clone(),
+                turn("turn-1"),
+                attention_resolved("approval-1"),
+            ),
+        )
+        .expect("pending attention resolution accepted after completion");
+        assert_eq!(stream.sequence, 4);
+
+        accept_structured_activity(
+            "session-1",
+            &mut stream,
+            input(event_source.clone(), turn("turn-2"), turn_started()),
+        )
+        .expect("new turn accepted after completed turn is clear");
+        assert_eq!(stream.sequence, 5);
+
+        assert!(accept_structured_activity(
+            "session-1",
+            &mut stream,
+            input(event_source, turn("turn-1"), turn_completed()),
+        )
+        .is_err());
+        assert_eq!(stream.sequence, 5);
     }
 }

@@ -1,6 +1,13 @@
 import type { ActivityEvent, LiveTurnLifecycle } from "./lifecycle";
 import type { AgentSession } from "./models";
-import type { HostedSessionSnapshot, SessionEventEnvelope, SessionTransportDescriptor } from "./sessionHost";
+import type {
+  HostedSessionSnapshot,
+  SessionEventEnvelope,
+  SessionTransportDescriptor,
+  StructuredLifecycleIntegration,
+  StructuredLifecycleSource,
+  StructuredTurnIdentity,
+} from "./sessionHost";
 import {
   applySessionActivityEvents,
   createLiveTurnLifecycleFromSessionStatus,
@@ -14,6 +21,10 @@ export interface SessionConnectionSnapshot {
   readonly streamId: string;
   readonly transport: SessionTransportDescriptor;
   readonly open: boolean;
+  readonly source?: StructuredLifecycleSource;
+  readonly currentTurn?: StructuredTurnIdentity;
+  readonly pendingAttentionKeys?: readonly string[];
+  readonly turnCompleted?: boolean;
 }
 
 export interface SessionRuntimeState {
@@ -92,12 +103,25 @@ export function reduceSessionRuntime(state: SessionRuntimeState, action: Session
         const cursor = state.cursorBySessionId[snapshot.sessionId] ?? -1;
         if (!connection.open || snapshot.lastSequence < cursor) return state;
       }
-      const connectedState = replaceSessionConnection(state, session, true, true);
+      const acceptedSession = acceptOpenedSession(session, snapshot.transport);
+      if (!acceptedSession || !connectionSourceCanRemain(connection, snapshot.streamId, snapshot.transport)) return state;
+      const connectedSession = acceptedSession.connected && acceptedSession.running
+        ? acceptedSession
+        : { ...acceptedSession, connected: true, running: true };
+      const connectedState = connectedSession === session ? state : replaceSession(state, connectedSession);
       return {
         ...connectedState,
         connectionBySessionId: {
           ...connectedState.connectionBySessionId,
-          [snapshot.sessionId]: { streamId: snapshot.streamId, transport: snapshot.transport, open: true },
+          [snapshot.sessionId]: {
+            streamId: snapshot.streamId,
+            transport: snapshot.transport,
+            open: true,
+            source: transportSource(snapshot.transport),
+            currentTurn: connection?.streamId === snapshot.streamId ? connection.currentTurn : undefined,
+            pendingAttentionKeys: connection?.streamId === snapshot.streamId ? connection.pendingAttentionKeys : undefined,
+            turnCompleted: connection?.streamId === snapshot.streamId ? connection.turnCompleted : undefined,
+          },
         },
         cursorBySessionId: { ...connectedState.cursorBySessionId, [snapshot.sessionId]: snapshot.lastSequence },
       };
@@ -123,16 +147,45 @@ function reduceHostEvent(state: SessionRuntimeState, envelope: SessionEventEnvel
     }
   }
 
+  if (envelope.event.type === "opened") {
+    const acceptedSession = acceptOpenedSession(session, envelope.event.transport);
+    if (!acceptedSession) return state;
+    const openedSession = acceptedSession.connected && acceptedSession.running
+      ? acceptedSession
+      : { ...acceptedSession, connected: true, running: true };
+    const sessionState = openedSession === session ? state : replaceSession(state, openedSession);
+    return {
+      ...sessionState,
+      connectionBySessionId: {
+        ...sessionState.connectionBySessionId,
+        [envelope.sessionId]: {
+          streamId: envelope.streamId,
+          transport: envelope.event.transport,
+          open: true,
+          source: transportSource(envelope.event.transport),
+        },
+      },
+      cursorBySessionId: { ...sessionState.cursorBySessionId, [envelope.sessionId]: envelope.sequence },
+    };
+  }
+
+  if (!connection) return state;
+
+  let acceptedConnection: SessionConnectionSnapshot = connection;
+  if (envelope.event.type === "activity") {
+    const nextConnection = acceptHostActivity(connection, envelope.event);
+    if (!nextConnection) return state;
+    acceptedConnection = nextConnection;
+  }
+
   let next: SessionRuntimeState = {
     ...state,
-    connectionBySessionId: envelope.event.type === "opened"
-      ? { ...state.connectionBySessionId, [envelope.sessionId]: { streamId: envelope.streamId, transport: envelope.event.transport, open: true } }
-      : state.connectionBySessionId,
+    connectionBySessionId: acceptedConnection === connection
+      ? state.connectionBySessionId
+      : { ...state.connectionBySessionId, [envelope.sessionId]: acceptedConnection },
     cursorBySessionId: { ...state.cursorBySessionId, [envelope.sessionId]: envelope.sequence },
   };
-  if (envelope.event.type === "opened") {
-    next = replaceSessionConnection(next, session, true, true);
-  } else if (envelope.event.type === "activity") {
+  if (envelope.event.type === "activity") {
     next = reduceSessionRuntime(next, { type: "activity", sessionId: envelope.sessionId, events: [envelope.event.activity] });
   } else if (envelope.event.type === "closed") {
     const status = envelope.event.outcome.type === "stopped"
@@ -145,22 +198,101 @@ function reduceHostEvent(state: SessionRuntimeState, envelope: SessionEventEnvel
   return next;
 }
 
+const EXPECTED_INTEGRATION_BY_AGENT = {
+  codex: "app-server",
+  "claude-code": "hooks",
+  pi: "rpc",
+} as const satisfies Record<AgentSession["agentId"], StructuredLifecycleIntegration>;
+
+function acceptOpenedSession(
+  session: AgentSession,
+  transport: SessionTransportDescriptor,
+): AgentSession | undefined {
+  const source = transportSource(transport);
+  if (!source) return transport.type === "pty" && transport.lifecycleEvidence === "fallback" ? session : undefined;
+  if (source.agentId !== session.agentId) return undefined;
+  if (source.integration !== EXPECTED_INTEGRATION_BY_AGENT[session.agentId]) return undefined;
+  if ((source.agentId === "claude-code") !== (transport.type === "pty")) return undefined;
+  if (session.externalSessionId !== undefined && session.externalSessionId !== source.providerSessionId) return undefined;
+  return session.externalSessionId === source.providerSessionId
+    ? session
+    : { ...session, externalSessionId: source.providerSessionId };
+}
+
+function transportSource(transport: SessionTransportDescriptor): StructuredLifecycleSource | undefined {
+  return transport.lifecycleEvidence === "structured" ? transport.source : undefined;
+}
+
+function connectionSourceCanRemain(
+  connection: SessionConnectionSnapshot | undefined,
+  streamId: string,
+  transport: SessionTransportDescriptor,
+): boolean {
+  if (connection?.streamId !== streamId) return true;
+  const source = transportSource(transport);
+  if (!connection.source && !source) return true;
+  if (!connection.source || !source) return false;
+  return sourceIdentityMatches(connection.source, source);
+}
+
+function acceptHostActivity(
+  connection: SessionConnectionSnapshot,
+  event: Extract<SessionEventEnvelope["event"], { type: "activity" }>,
+): SessionConnectionSnapshot | undefined {
+  if (!connection.source || !sourceIdentityMatches(connection.source, event.source)) return undefined;
+  const currentTurn = connection.currentTurn;
+  const nextTurn = event.context.turn;
+  const pendingAttentionKeys = connection.pendingAttentionKeys ?? [];
+
+  if (event.activity.type === "turn-started") {
+    if (currentTurn) {
+      if (turnMatches(currentTurn, nextTurn)) return undefined;
+      if (!connection.turnCompleted || pendingAttentionKeys.length > 0) return undefined;
+    }
+    return {
+      ...connection,
+      currentTurn: nextTurn,
+      pendingAttentionKeys: [],
+      turnCompleted: false,
+    };
+  }
+
+  if (!currentTurn || !turnMatches(currentTurn, nextTurn)) return undefined;
+
+  if (event.activity.type === "attention-requested") {
+    if (connection.turnCompleted || pendingAttentionKeys.includes(event.activity.key)) return undefined;
+    return { ...connection, pendingAttentionKeys: [...pendingAttentionKeys, event.activity.key] };
+  } else if (event.activity.type === "attention-resolved") {
+    const resolvedKey = event.activity.key;
+    if (!pendingAttentionKeys.includes(resolvedKey)) return undefined;
+    return {
+      ...connection,
+      pendingAttentionKeys: pendingAttentionKeys.filter((key) => key !== resolvedKey),
+    };
+  } else if (event.activity.type === "turn-completed") {
+    if (connection.turnCompleted) return undefined;
+    return { ...connection, turnCompleted: true };
+  }
+
+  return undefined;
+}
+
+function sourceIdentityMatches(a: StructuredLifecycleSource, b: StructuredLifecycleSource): boolean {
+  return a.agentId === b.agentId
+    && a.integration === b.integration
+    && a.providerSessionId === b.providerSessionId;
+}
+
+function turnMatches(a: StructuredTurnIdentity, b: StructuredTurnIdentity): boolean {
+  return a.key === b.key && a.provenance === b.provenance;
+}
+
 function find(state: SessionRuntimeState, id: string): AgentSession | undefined {
   return state.sessions.find((session) => session.id === id);
 }
 
 function replaceSession(state: SessionRuntimeState, session: AgentSession): SessionRuntimeState {
   return { ...state, sessions: state.sessions.map((candidate) => candidate.id === session.id ? session : candidate) };
-}
-
-function replaceSessionConnection(
-  state: SessionRuntimeState,
-  session: AgentSession,
-  connected: boolean,
-  running: boolean,
-): SessionRuntimeState {
-  if (session.connected === connected && session.running === running) return state;
-  return replaceSession(state, { ...session, connected, running });
 }
 
 function applySessionAndLifecycle(state: SessionRuntimeState, session: AgentSession, lifecycle: LiveTurnLifecycle): SessionRuntimeState {

@@ -316,7 +316,7 @@ export default function App() {
     setDiscoveryCleanupPlan(null);
     cleanupIds.forEach((sessionId) => {
       const connection = connectionFor(sessionId);
-      if (connection) void stopHostedSession({ protocolVersion: 1, sessionId, streamId: connection.streamId }).catch(() => undefined);
+      if (connection) void stopHostedSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId, streamId: connection.streamId }).catch(() => undefined);
       clearTerminalBuffer(sessionId);
     });
   }, [discoveryCleanupPlan, sessions]);
@@ -890,12 +890,12 @@ export default function App() {
         // lands in Codex's composer without submitting until a later Enter.
         const streamId = connectionFor(sessionId)?.streamId;
         if (!streamId) throw new Error("Session stream is unavailable");
-        await sendSession({ protocolVersion: 1, sessionId, streamId, input: { type: "terminal", data: multiline ? `\x1b[200~${submittedPrompt}\x1b[201~` : submittedPrompt } });
-        await sendSession({ protocolVersion: 1, sessionId, streamId, input: { type: "terminal", data: "\r" } });
+        await sendSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId, streamId, input: { type: "terminal", data: multiline ? `\x1b[200~${submittedPrompt}\x1b[201~` : submittedPrompt } });
+        await sendSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId, streamId, input: { type: "terminal", data: "\r" } });
       } else {
         const streamId = connectionFor(sessionId)?.streamId;
         if (!streamId) throw new Error("Session stream is unavailable");
-        await sendSession({ protocolVersion: 1, sessionId, streamId, input: { type: "terminal", data } });
+        await sendSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId, streamId, input: { type: "terminal", data } });
       }
       engagedSessionIdsRef.current.add(sessionId);
       agentOutputSeenRef.current.delete(sessionId);
@@ -947,7 +947,7 @@ export default function App() {
     try {
       const streamId = connectionFor(activeSession.id)?.streamId;
       if (!streamId) throw new Error("Session stream is unavailable");
-      await stopHostedSession({ protocolVersion: 1, sessionId: activeSession.id, streamId });
+      await stopHostedSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId: activeSession.id, streamId });
       setSessionRuntime((current) => reduceSessionRuntime(
         updateRuntimeSession(current, activeSession.id, (session) => ({
           ...session, connected: false, running: false,

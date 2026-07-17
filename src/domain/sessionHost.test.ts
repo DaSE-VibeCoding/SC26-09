@@ -3,8 +3,16 @@ import {
   SESSION_HOST_PROTOCOL_VERSION,
   hasInteractiveTerminal,
   type SessionOpenRequest,
+  type StructuredLifecycleSource,
   type SessionTransportDescriptor,
 } from "./sessionHost";
+
+const claudeHooksSource: StructuredLifecycleSource = {
+  agentId: "claude-code",
+  integration: "hooks",
+  providerSessionId: "claude-session-1",
+  provenance: "provider-handshake",
+};
 
 function openRequestFixture(recovery: SessionOpenRequest["recovery"]): SessionOpenRequest {
   return {
@@ -22,17 +30,18 @@ function openRequestFixture(recovery: SessionOpenRequest["recovery"]): SessionOp
 describe("session transport capabilities", () => {
   it.each([
     [{ type: "pty", lifecycleEvidence: "fallback" }, true],
-    [{ type: "pty", lifecycleEvidence: "structured" }, true],
-    [{ type: "protocol", lifecycleEvidence: "structured" }, false],
+    [{ type: "pty", lifecycleEvidence: "structured", source: claudeHooksSource }, true],
+    [{ type: "protocol", lifecycleEvidence: "structured", source: { agentId: "codex", integration: "app-server", providerSessionId: "codex-thread-1", provenance: "provider-handshake" } }, false],
+    [{ type: "protocol", lifecycleEvidence: "structured", source: { agentId: "pi", integration: "rpc", providerSessionId: "pi-session-1", provenance: "provider-handshake" } }, false],
   ] satisfies Array<[SessionTransportDescriptor, boolean]>)("maps %j terminal capability", (transport, expected) => {
     expect(hasInteractiveTerminal(transport)).toBe(expected);
   });
 });
 
-describe("session open request v1", () => {
+describe("session open request v2", () => {
   it("includes explicit PTY fallback transport, title, and terminal size for new sessions", () => {
     expect(openRequestFixture({ type: "new" })).toEqual({
-      protocolVersion: 1,
+      protocolVersion: 2,
       sessionId: "session-1",
       agentId: "codex",
       workspacePath: "/workspace/project",

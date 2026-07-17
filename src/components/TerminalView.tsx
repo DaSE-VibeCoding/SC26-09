@@ -6,6 +6,7 @@ import {
   resizeSession,
   sendSession,
 } from "../services/native";
+import { SESSION_HOST_PROTOCOL_VERSION } from "../domain/sessionHost";
 import { useTerminalBuffer } from "../services/terminalBuffer";
 
 interface TerminalViewProps {
@@ -95,7 +96,7 @@ export function TerminalView({
 
     const inputDisposable = terminal.onData((data) => {
       if (!interactiveRef.current) return;
-      void sendSession({ protocolVersion: 1, sessionId, streamId, input: { type: "terminal", data } })
+      void sendSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId, streamId, input: { type: "terminal", data } })
         .then(() => onInputRef.current(sessionId, data))
         .catch((reason: unknown) => {
           onErrorRef.current(errorMessage(reason));
@@ -105,7 +106,7 @@ export function TerminalView({
     const resizeObserver = new ResizeObserver(() => {
       fit.fit();
       if (interactiveRef.current) {
-        void resizeSession({ protocolVersion: 1, sessionId, streamId, rows: terminal.rows, cols: terminal.cols }).catch(() => undefined);
+        void resizeSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId, streamId, rows: terminal.rows, cols: terminal.cols }).catch(() => undefined);
       }
     });
     resizeObserver.observe(hostRef.current);
@@ -148,7 +149,7 @@ export function TerminalView({
     }
     queueMicrotask(() => {
       fitRef.current?.fit();
-      void resizeSession({ protocolVersion: 1, sessionId, streamId, rows: terminal.rows, cols: terminal.cols }).catch(() => undefined);
+      void resizeSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId, streamId, rows: terminal.rows, cols: terminal.cols }).catch(() => undefined);
     });
   }, [interactive, sessionId, streamId]);
 
@@ -159,7 +160,7 @@ export function TerminalView({
         if (!terminal) return;
         fitRef.current?.fit();
         if (interactiveRef.current) {
-          void resizeSession({ protocolVersion: 1, sessionId, streamId, rows: terminal.rows, cols: terminal.cols }).catch(() => undefined);
+          void resizeSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId, streamId, rows: terminal.rows, cols: terminal.cols }).catch(() => undefined);
         }
         terminal.focus();
       });

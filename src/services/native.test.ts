@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { openSession, spawnTerminal, writeTerminal, stopTerminal, isTauri } from "./native";
+import { SESSION_HOST_PROTOCOL_VERSION } from "../domain/sessionHost";
 
 describe("native terminal guards", () => {
   it("reports that Vitest runs outside the Tauri webview", () => {
@@ -25,7 +26,7 @@ describe("native terminal guards", () => {
 
   it("rejects a prepared launch whose executable differs from the semantic request", async () => {
     await expect(openSession({
-      protocolVersion: 1, sessionId: "s", agentId: "codex", workspacePath: "/tmp", title: "Test",
+      protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId: "s", agentId: "codex", workspacePath: "/tmp", title: "Test",
       transport: { type: "pty-fallback", executable: "/bin/cat" }, terminalSize: { rows: 24, cols: 80 }, recovery: { type: "new" },
     }, { program: "/bin/echo", args: ["secret"], env: { TOKEN: "secret" } })).rejects.toThrow(/does not match/);
   });
