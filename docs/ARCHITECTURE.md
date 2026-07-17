@@ -16,7 +16,7 @@ The client must never infer a session's state from component lifecycle. It consu
 - `AgentSession` is a provider conversation associated with a workspace. `running` means the provider reports a live process; `connected` separately means Pelican owns its interactive PTY.
 - `AgentAdapter` describes launch, resume, process detection, and status-integration capabilities.
 - `SessionStatus` is one of `attention`, `working`, `done`, `idle`, `available`, or `offline`.
-- `ActivityEvent` is immutable evidence used to update a session.
+- `ActivityEvent` is normalized, immutable live-turn evidence. It records provider-neutral turn start, attention request/resolution, turn completion, and Pelican result review events, without raw provider payloads or provider-specific event names.
 
 ## First-class agent adapters
 
@@ -50,16 +50,22 @@ The UI requests a session through a typed command. Pelican Core opens a PTY, lau
 
 The daemon milestone will add a versioned local-socket protocol and replayable terminal buffers. The desktop app will become a disposable client that can detach and reattach without affecting agents.
 
-## Normalized lifecycle precedence
+## Pure live-turn lifecycle contract
 
-1. An unresolved approval, user-input request, or extension UI request is `attention`.
-2. Structured turn/agent activity is `working`.
-3. A structured completion becomes `done` until reviewed in Pelican.
+`src/domain/lifecycle.ts` owns the provider-neutral live-turn reducer contract. It is a pure model for LC-00 and does not imply that the current runtime is wired to the reducer yet. Provider adapters and future protocol decoders own conversion from provider-specific events into normalized `ActivityEvent` values.
+
+The reducer only derives live statuses: `idle`, `working`, `attention`, and `done`. Connection and process reachability remain outside the live-turn reducer: saved history with a deterministic resume handle is still modeled as `available`, and a missing transport or stopped process without a resume handle is still modeled as `offline` by the surrounding session layer.
+
+Live-turn precedence is:
+
+1. Any unresolved, correlated attention key is `attention`.
+2. A turn in progress with no unresolved attention is `working`.
+3. A completed turn with no unresolved attention is `done` until reviewed in Pelican.
 4. A reviewed completion is `idle`.
-5. Saved history with a deterministic resume handle is `available`.
-6. A missing transport or stopped process without a resume handle is `offline`.
 
-Codex `turn/completed`, Claude `Stop`, and Pi `agent_settled` are the primary completion signals. Pi `agent_end` is intentionally not treated as completion because retries, compaction, or queued work may follow. A live PID alone never proves that an agent is working.
+Structured lifecycle evidence is authoritative over fallback evidence. Once accepted, structured evidence permanently suppresses later fallback lifecycle evidence for that live reducer state. Promotion is a one-way authority latch, not a state reset: only the structured event's own transition changes the turn phase or pending attention. Completion received while attention keys remain pending is latent: the visible status stays `attention` and reveals `done` only after the final matching attention resolution. Reviewing during unresolved attention is intentionally a no-op.
+
+Provider-specific lifecycle names stay in adapter code and fixtures. The domain contract only accepts normalized events, and a live PID alone never proves that an agent is working.
 
 ## Security and privacy
 
