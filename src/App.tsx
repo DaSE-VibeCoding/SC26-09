@@ -15,6 +15,17 @@ import type {
   SessionMode,
   Workspace,
 } from "./domain/models";
+import type { ActivityEvent, LiveTurnLifecycle } from "./domain/lifecycle";
+import {
+  applySessionActivityEvent,
+  applySessionActivityEvents,
+  createLiveTurnLifecycleFromSessionStatus,
+  initializeSessionLifecycleForMode,
+  reviewSessionLifecycle,
+  selectTerminalOutputFallbackAction,
+  type LiveSessionInitializationMode,
+  PTY_FALLBACK_ATTENTION_KEY,
+} from "./domain/sessionLifecycle";
 import { reduceSessionStatus, scanTerminalAttention, TURN_IDLE_MS } from "./domain/status";
 import {
   chooseWorkspace,
@@ -73,14 +84,6 @@ function statusLabel(status: AgentSession["status"]): string {
   }
 }
 
-function reviewSession(session: AgentSession): AgentSession {
-  return {
-    ...session,
-    unread: false,
-    status: reduceSessionStatus(session.status, { type: "reviewed", running: session.running }),
-  };
-}
-
 function previewState(): { workspaces: Workspace[]; sessions: AgentSession[] } {
   const now = new Date().toISOString();
   const workspace: Workspace = {
@@ -107,6 +110,31 @@ const DIALOG_FOCUSABLE = [
   "[href]",
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
+
+const FALLBACK_TURN_STARTED_EVENT = {
+  type: "turn-started",
+  evidence: "fallback",
+} satisfies ActivityEvent;
+
+const FALLBACK_ATTENTION_REQUESTED_EVENT = {
+  type: "attention-requested",
+  evidence: "fallback",
+  key: PTY_FALLBACK_ATTENTION_KEY,
+} satisfies ActivityEvent;
+
+const FALLBACK_SUBMISSION_EVENTS = [
+  {
+    type: "attention-resolved",
+    evidence: "fallback",
+    key: PTY_FALLBACK_ATTENTION_KEY,
+  },
+  FALLBACK_TURN_STARTED_EVENT,
+] satisfies readonly ActivityEvent[];
+
+const FALLBACK_TURN_COMPLETED_EVENT = {
+  type: "turn-completed",
+  evidence: "fallback",
+} satisfies ActivityEvent;
 
 function useDialogFocus<T extends HTMLElement>(open: boolean) {
   const ref = useRef<T>(null);
@@ -204,6 +232,7 @@ export default function App() {
   const engagedSessionIdsRef = useRef(new Set<string>());
   const agentOutputSeenRef = useRef(new Set<string>());
   const turnIdleTimersRef = useRef<Record<string, number>>({});
+  const liveTurnLifecycleRef = useRef<Record<string, LiveTurnLifecycle>>({});
   const sessionDiscoveryInFlightRef = useRef(false);
   const createSessionInFlightRef = useRef(false);
   const discoveryErrorRef = useRef<string | null>(null);
@@ -239,6 +268,51 @@ export default function App() {
     if (!activeSessionId) return;
     setDrafts((current) => ({ ...current, [activeSessionId]: value }));
   }, [activeSessionId]);
+
+  const initializeLiveSession = (
+    session: AgentSession,
+    mode: LiveSessionInitializationMode,
+  ): AgentSession => {
+    const applied = initializeSessionLifecycleForMode(
+      session,
+      mode,
+      liveTurnLifecycleRef.current[session.id],
+    );
+    liveTurnLifecycleRef.current[session.id] = applied.lifecycle;
+    return applied.session;
+  };
+
+  const applyLiveActivityEvents = (
+    session: AgentSession,
+    events: readonly ActivityEvent[],
+  ): AgentSession => {
+    const lifecycle = liveTurnLifecycleRef.current[session.id]
+      ?? createLiveTurnLifecycleFromSessionStatus(session.status);
+    const applied = applySessionActivityEvents(session, lifecycle, events);
+    liveTurnLifecycleRef.current[session.id] = applied.lifecycle;
+    return applied.session;
+  };
+
+  const applyLiveActivityEvent = (
+    session: AgentSession,
+    event: ActivityEvent,
+  ): AgentSession => {
+    const lifecycle = liveTurnLifecycleRef.current[session.id]
+      ?? createLiveTurnLifecycleFromSessionStatus(session.status);
+    const applied = applySessionActivityEvent(session, lifecycle, event);
+    liveTurnLifecycleRef.current[session.id] = applied.lifecycle;
+    return applied.session;
+  };
+
+  const reviewVisibleSession = (session: AgentSession): AgentSession => {
+    const reviewed = reviewSessionLifecycle(session, liveTurnLifecycleRef.current[session.id]);
+    if (reviewed.lifecycle) {
+      liveTurnLifecycleRef.current[session.id] = reviewed.lifecycle;
+    } else {
+      delete liveTurnLifecycleRef.current[session.id];
+    }
+    return reviewed.session;
+  };
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -311,14 +385,14 @@ export default function App() {
         liveIds.forEach((sessionId) => initializeTerminalBuffer(sessionId));
         setSessions((current) => current.map((session) => (
           live.has(session.id)
-            ? {
-                ...session,
-                connected: true,
-                running: true,
-                status: session.status === "available" || session.status === "offline"
-                  ? "idle"
-                  : session.status,
-              }
+            ? initializeLiveSession(
+                {
+                  ...session,
+                  connected: true,
+                  running: true,
+                },
+                liveTurnLifecycleRef.current[session.id] ? "reuse-existing" : "seed-from-status",
+              )
             : session
         )));
       })
@@ -344,14 +418,14 @@ export default function App() {
           ? current
           : current.map((session) => (
             live.has(session.id)
-              ? {
-                  ...session,
-                  connected: true,
-                  running: true,
-                  status: session.status === "available" || session.status === "offline"
-                    ? "idle"
-                    : session.status,
-                }
+              ? initializeLiveSession(
+                  {
+                    ...session,
+                    connected: true,
+                    running: true,
+                  },
+                  liveTurnLifecycleRef.current[session.id] ? "reuse-existing" : "seed-from-status",
+                )
               : session
           ));
         const merged = mergeDiscoveredSessions(
@@ -362,9 +436,12 @@ export default function App() {
         );
         const mergedIds = new Set(merged.map((session) => session.id));
         for (const session of current) {
-          if (session.connected && !mergedIds.has(session.id) && !live.has(session.id)) {
-            void stopTerminal(session.id).catch(() => undefined);
-            clearTerminalBuffer(session.id);
+          if (!mergedIds.has(session.id)) {
+            delete liveTurnLifecycleRef.current[session.id];
+            if (session.connected && !live.has(session.id)) {
+              void stopTerminal(session.id).catch(() => undefined);
+              clearTerminalBuffer(session.id);
+            }
           }
         }
         return merged;
@@ -520,8 +597,7 @@ export default function App() {
             agentOutputSeenRef.current.delete(event.sessionId);
             setSessions((current) => current.map((session) => session.id === event.sessionId
               ? {
-                  ...session,
-                  status: reduceSessionStatus(session.status, { type: "turn-completed" }),
+                  ...applyLiveActivityEvent(session, FALLBACK_TURN_COMPLETED_EVENT),
                   unread: session.id !== activeSessionIdRef.current,
                   lastActivityAt: new Date().toISOString(),
                 }
@@ -556,17 +632,26 @@ export default function App() {
             setSessions((current) => current.map((session) => {
               if (!pendingActivity.has(session.id) || exitedSessionIdsRef.current.has(session.id)) return session;
               const requestedAttention = pendingAttention[session.id] ?? false;
-              const hasStartedWork = engagedSessionIdsRef.current.has(session.id);
+              const lifecycle = liveTurnLifecycleRef.current[session.id]
+                ?? createLiveTurnLifecycleFromSessionStatus(session.status);
+              const fallbackAction = selectTerminalOutputFallbackAction(lifecycle, {
+                currentStatus: session.status,
+                requestedAttention,
+                hasStartedWork: engagedSessionIdsRef.current.has(session.id),
+              });
+              const lifecycleSession = fallbackAction === "request-attention"
+                ? applyLiveActivityEvent(session, FALLBACK_ATTENTION_REQUESTED_EVENT)
+                : fallbackAction === "start-turn"
+                  ? applyLiveActivityEvent(session, FALLBACK_TURN_STARTED_EVENT)
+                  : session;
               return {
-                ...session,
-                status: requestedAttention
-                  ? reduceSessionStatus(session.status, { type: "attention-requested" })
-                  : hasStartedWork
-                    ? reduceSessionStatus(session.status, { type: "activity" })
-                    : session.status,
+                ...lifecycleSession,
                 lastActivityAt: new Date().toISOString(),
-                unread: requestedAttention
-                  || (hasStartedWork && session.id !== activeSessionIdRef.current),
+                unread: fallbackAction === "request-attention"
+                  ? true
+                  : fallbackAction === "start-turn"
+                    ? session.id !== activeSessionIdRef.current
+                    : session.unread,
               };
             }));
           }, 160);
@@ -584,6 +669,7 @@ export default function App() {
         const intentionallyStopped = stoppingSessionIdsRef.current.delete(event.sessionId);
         const endedSession = sessionsRef.current.find((session) => session.id === event.sessionId);
         notifiedAttentionRef.current.delete(event.sessionId);
+        delete liveTurnLifecycleRef.current[event.sessionId];
         setStoppingSessionIds((current) => {
           if (!current.has(event.sessionId)) return current;
           const next = new Set(current);
@@ -647,7 +733,7 @@ export default function App() {
         setActiveSessionId(firstSession?.id ?? null);
         if (firstSession) {
           setSessions((current) => current.map((session) => session.id === firstSession.id
-            ? reviewSession(session)
+            ? reviewVisibleSession(session)
             : session));
         }
         return;
@@ -672,7 +758,7 @@ export default function App() {
     setActiveWorkspaceId(session.workspaceId);
     setActiveSessionId(sessionId);
     setSessions((current) => current.map((candidate) => candidate.id === sessionId
-      ? reviewSession(candidate)
+      ? reviewVisibleSession(candidate)
       : candidate));
   }, []);
 
@@ -733,12 +819,13 @@ export default function App() {
           cols: 110,
         });
         setSessions((current) => current.map((candidate) => candidate.id === id && !exitedSessionIdsRef.current.has(id)
-          ? { ...candidate, connected: true, running: true }
+          ? initializeLiveSession({ ...candidate, connected: true, running: true }, "reuse-existing")
           : candidate));
         queueMicrotask(() => promptRef.current?.focus());
       } catch (reason) {
         setSessions((current) => current.filter((candidate) => candidate.id !== id));
         clearTerminalBuffer(id);
+        delete liveTurnLifecycleRef.current[id];
         setActiveSessionId((current) => current === id ? previousActiveSessionId : current);
         setError(`Could not start ${adapter.displayName}: ${errorMessage(reason)}`);
       } finally {
@@ -801,13 +888,15 @@ export default function App() {
         cols: 110,
       });
       setSessions((current) => current.map((session) => session.id === target.id
-        ? {
-            ...session,
-            connected: true,
-            running: true,
-            status: attachSessionId ? session.status : "idle",
-            unread: false,
-          }
+        ? initializeLiveSession(
+            {
+              ...session,
+              connected: true,
+              running: true,
+              unread: false,
+            },
+            attachSessionId ? "seed-from-status" : "fresh",
+          )
         : session));
     } catch (reason) {
       const message = errorMessage(reason);
@@ -815,15 +904,18 @@ export default function App() {
       if (/already exists/i.test(message)) {
         initializeTerminalBuffer(target.id);
         setSessions((current) => current.map((session) => session.id === target.id
-          ? {
-              ...session,
-              connected: true,
-              running: true,
-              status: session.status === "available" || session.status === "offline" ? "idle" : session.status,
-              unread: false,
-            }
+          ? initializeLiveSession(
+              {
+                ...session,
+                connected: true,
+                running: true,
+                unread: false,
+              },
+              "seed-from-status",
+            )
           : session));
       } else {
+        delete liveTurnLifecycleRef.current[target.id];
         setSessions((current) => current.map((session) => session.id === target.id
           ? previous
           : session));
@@ -889,7 +981,11 @@ export default function App() {
         && !exitedSessionIdsRef.current.has(sessionId)
         && !stoppingSessionIdsRef.current.has(sessionId)
       )
-        ? { ...session, status: "working", unread: false, title: session.title.startsWith("New ") ? submittedPrompt.slice(0, 96) : session.title }
+        ? {
+            ...applyLiveActivityEvents(session, FALLBACK_SUBMISSION_EVENTS),
+            unread: false,
+            title: session.title.startsWith("New ") ? submittedPrompt.slice(0, 96) : session.title,
+          }
         : session));
     } catch (reason) {
       setDrafts((current) => current[sessionId]
@@ -912,6 +1008,7 @@ export default function App() {
     setStoppingSessionIds((current) => new Set(current).add(activeSession.id));
     try {
       await stopTerminal(activeSession.id);
+      delete liveTurnLifecycleRef.current[activeSession.id];
       setSessions((current) => current.map((session) => session.id === activeSession.id
         ? {
             ...session,
@@ -949,6 +1046,7 @@ export default function App() {
     });
     clearTerminalBuffer(sessionId);
     notifiedAttentionRef.current.delete(sessionId);
+    delete liveTurnLifecycleRef.current[sessionId];
     setActiveSessionId((current) => current === sessionId ? nextSession?.id ?? null : current);
   }, []);
 
@@ -968,7 +1066,11 @@ export default function App() {
     pendingActivityRef.current.delete(sessionId);
     delete pendingAttentionRef.current[sessionId];
     setSessions((current) => current.map((session) => session.id === sessionId
-      ? { ...session, status: "working", unread: false, lastActivityAt: new Date().toISOString() }
+      ? {
+          ...applyLiveActivityEvents(session, FALLBACK_SUBMISSION_EVENTS),
+          unread: false,
+          lastActivityAt: new Date().toISOString(),
+        }
       : session));
   }, []);
 
