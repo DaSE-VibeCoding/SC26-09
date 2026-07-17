@@ -48,6 +48,26 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
     var(--bg);
 }
 
+.app-shell.has-preview-banner {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.preview-banner {
+  grid-column: 1 / -1;
+  padding: 10px 16px;
+  background: #3a2a12;
+  color: #ffd59a;
+  border-bottom: 1px solid #6a5228;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.preview-banner code {
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: #ffe6b8;
+}
+
 .left-sidebar, .right-sidebar {
   min-width: 0;
   background: linear-gradient(180deg, #0a1b35 0%, #08172d 100%);

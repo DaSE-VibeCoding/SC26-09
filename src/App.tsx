@@ -90,8 +90,8 @@ function previewState(): { workspaces: Workspace[]; sessions: AgentSession[] } {
   return {
     workspaces: [workspace],
     sessions: [
-      { id: "preview-codex", workspaceId: workspace.id, agentId: "codex", title: "Build session host", status: "working", createdAt: now, lastActivityAt: now, unread: false, connected: true, running: true, origin: "pelican" },
-      { id: "preview-claude", workspaceId: workspace.id, agentId: "claude-code", title: "Review agent protocol", status: "attention", createdAt: now, lastActivityAt: now, unread: true, connected: true, running: true, origin: "pelican" },
+      { id: "preview-codex", workspaceId: workspace.id, agentId: "codex", title: "Build session host", status: "available", createdAt: now, lastActivityAt: now, unread: false, connected: false, running: false, resumeHandle: "preview-codex-thread", origin: "pelican" },
+      { id: "preview-claude", workspaceId: workspace.id, agentId: "claude-code", title: "Review agent protocol", status: "available", createdAt: now, lastActivityAt: now, unread: false, connected: false, running: false, externalSessionId: "preview-claude-provider", resumeHandle: "preview-claude-session", origin: "claude-history" },
       { id: "preview-pi", workspaceId: workspace.id, agentId: "pi", title: "Keyboard flow", status: "available", createdAt: now, lastActivityAt: now, unread: false, connected: false, running: false, externalSessionId: "preview-pi-provider", resumeHandle: "preview-pi-session", origin: "pi-history" },
     ],
   };
@@ -932,7 +932,12 @@ export default function App() {
   }, [addWorkspace, openAgentPicker, overlayOpen, selectSession]);
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell${isTauri() ? "" : " has-preview-banner"}`}>
+      {!isTauri() && (
+        <div className="preview-banner" role="status">
+          Browser preview only — agent terminals require the Pelican window from <code>npm run tauri dev</code>, not http://localhost:1420 in Chrome.
+        </div>
+      )}
       <aside className="left-sidebar" inert={overlayOpen ? true : undefined} aria-hidden={overlayOpen ? true : undefined}>
         <div className="brand-row">
           <PelicanLogo className="brand-mark" size={32} />
