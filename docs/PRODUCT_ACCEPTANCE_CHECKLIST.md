@@ -20,7 +20,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 | Lightweight macOS desktop app | Partial | Tauri, React, TypeScript, and a small dependency set form a good prototype. Packaging, signing, notarization, updates, and measured startup/memory budgets are missing. |
 | Manage multiple agents across projects | Partial | Multiple workspaces and first-class Codex, Claude Code, and Pi sessions work. Workspace/session rename, archive, removal, search, and durable supervision are incomplete. |
 | Unified view of all threads and sessions | Partial | Saved Codex, Claude Code, and Pi sessions can be discovered for added workspaces. Arbitrary foreground TUIs cannot generally be attached, stale results are not reconciled, and Codex listing is not paginated. |
-| Real-time idle/running/waiting/completed status | Missing at product level | Current PTY heuristics can show startup, activity, attention text, and process exit. CX-01A/LC-02D fixture-verify private Codex success, approval, failure, and interruption decoding through the normalized gate, but no app-server process or production binding emits those events; Claude hooks and Pi RPC events also remain absent, so normal completed turns can remain `Working`. |
+| Real-time idle/running/waiting/completed status | Missing at product level | Current PTY heuristics can show startup, activity, attention text, and process exit. Private Codex and Pi fixture decoders normalize success, failure, interruption, and correlated attention, but no production app-server/RPC binding emits those events; Claude hooks also remain absent, so normal completed turns can remain `Working`. |
 | Left sidebar organizes workspaces, agents, sessions | Partial | Workspaces and sessions have agent logos, status text, unread state, and shortcuts. There is no independent collapse, grouping/filtering, global attention inbox, rename, archive, or pinning. |
 | Right sidebar shows files and Git context | Substantially implemented | File list, modified files, staged/unstaged/untracked diffs, refresh, empty, and error states exist. Folder interaction, file open/search, non-Git labeling, and richer diff feedback remain. |
 | Friendly command interface | Partial | The composer sends text to the connected PTY, preserves drafts, and has fixture-verified readiness gating/copy. It has no conversation transcript, tool progress, approvals, structured streaming, real readiness handshake producer, or turn-level interrupt. |
@@ -50,7 +50,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 | Saved-session inventory | App-server thread list, partial | Transcript scan, partial | JSONL scan, partial |
 | Resume saved history | `codex resume`, implemented path | `--resume`, implemented path | `--session <absolute path>`, implemented path |
 | Attach a live external session | Not for arbitrary TUI | Background `claude attach` only | Not for arbitrary TUI |
-| Authoritative live lifecycle | Fixture foundation only (CX-01A/LC-02D success, approval, and terminal outcomes; no production binding) | Missing | Missing |
+| Authoritative live lifecycle | Fixture foundation only (CX-01A/LC-02D; no production binding) | Missing | Fixture foundation only (PI-01A serialized prompt/settlement subset; no production binding) |
 | Authoritative prompt readiness producer | Missing | Missing | Missing |
 | Target structured transport | Long-lived app-server | Lifecycle hooks/background inventory | RPC or extension events |
 

@@ -37,7 +37,9 @@ Primary sources: [CLI reference](https://code.claude.com/docs/en/cli-reference),
 
 Preferred transport: `pi --mode rpc --name <title>`, one process per Pelican session. Pelican sends newline-delimited JSON commands and consumes structured events. Resume uses the stored absolute session JSONL path with `--session`.
 
-State mapping: unresolved extension UI request → attention; streaming, compaction, retry, or queued work → working; `agent_settled` → done/unread; reviewed settlement → idle; process exit → offline. `agent_end` is not completion.
+PI-01A fixture-verifies a private decoder only: correlated `get_state` plus the version-3 session header binds the exact provider session and absolute resume path; an accepted ordinary prompt's typed request ID owns one serialized lifecycle epoch. `agent_start` begins that epoch, each `turn_end` updates the candidate outcome across tool use or retry, and only `agent_settled` emits completed, failed, or interrupted. Untimed extension UI dialogs use exact request/response IDs for sticky attention. Timed dialogs, queued/concurrent/steering prompts, process ownership, prompt writes, readiness, and production RPC support remain excluded.
+
+State mapping target: unresolved extension UI request → attention; an active serialized prompt epoch, compaction, or retry → working; final `agent_settled` reason → done, attention, or idle; reviewed successful settlement → idle; process exit → offline. `agent_end` is not completion.
 
 PTY compatibility mode remains available for users who want Pi's native TUI, with lower-confidence state detection.
 
