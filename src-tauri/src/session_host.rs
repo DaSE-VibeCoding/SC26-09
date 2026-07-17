@@ -8,6 +8,7 @@ use std::thread;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 mod codex_app_server;
+mod pi_rpc;
 
 const VERSION: u8 = 3;
 const MAX_ID: usize = 256;
