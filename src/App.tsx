@@ -15,7 +15,7 @@ import type {
   SessionMode,
   Workspace,
 } from "./domain/models";
-import { reduceSessionStatus, scanTerminalAttention } from "./domain/status";
+import { reduceSessionStatus, scanTerminalAttention, TURN_IDLE_MS } from "./domain/status";
 import {
   chooseWorkspace,
   discoverAgentSessions,
@@ -201,6 +201,8 @@ export default function App() {
   const pendingActivityRef = useRef(new Set<string>());
   const pendingAttentionRef = useRef<Record<string, boolean>>({});
   const engagedSessionIdsRef = useRef(new Set<string>());
+  const agentOutputSeenRef = useRef(new Set<string>());
+  const turnIdleTimersRef = useRef<Record<string, number>>({});
   const sessionDiscoveryInFlightRef = useRef(false);
   const discoveryErrorRef = useRef<string | null>(null);
   const statusFlushTimerRef = useRef<number | null>(null);
@@ -503,6 +505,28 @@ export default function App() {
         pendingActivityRef.current.add(event.sessionId);
         pendingAttentionRef.current[event.sessionId] = pendingAttentionRef.current[event.sessionId] || needsAttention;
 
+        if (engagedSessionIdsRef.current.has(event.sessionId) && event.data.trim().length > 0) {
+          agentOutputSeenRef.current.add(event.sessionId);
+          const previousTimer = turnIdleTimersRef.current[event.sessionId];
+          if (previousTimer !== undefined) window.clearTimeout(previousTimer);
+          turnIdleTimersRef.current[event.sessionId] = window.setTimeout(() => {
+            delete turnIdleTimersRef.current[event.sessionId];
+            if (!engagedSessionIdsRef.current.has(event.sessionId)) return;
+            if (!agentOutputSeenRef.current.has(event.sessionId)) return;
+            if (exitedSessionIdsRef.current.has(event.sessionId)) return;
+            engagedSessionIdsRef.current.delete(event.sessionId);
+            agentOutputSeenRef.current.delete(event.sessionId);
+            setSessions((current) => current.map((session) => session.id === event.sessionId
+              ? {
+                  ...session,
+                  status: reduceSessionStatus(session.status, { type: "turn-completed" }),
+                  unread: session.id !== activeSessionIdRef.current,
+                  lastActivityAt: new Date().toISOString(),
+                }
+              : session));
+          }, TURN_IDLE_MS);
+        }
+
         const shouldNotify = activeSessionIdRef.current !== event.sessionId
           || document.visibilityState !== "visible"
           || !document.hasFocus();
@@ -549,6 +573,12 @@ export default function App() {
       onTerminalExit((event) => {
         exitedSessionIdsRef.current.add(event.sessionId);
         engagedSessionIdsRef.current.delete(event.sessionId);
+        agentOutputSeenRef.current.delete(event.sessionId);
+        const idleTimer = turnIdleTimersRef.current[event.sessionId];
+        if (idleTimer !== undefined) {
+          window.clearTimeout(idleTimer);
+          delete turnIdleTimersRef.current[event.sessionId];
+        }
         const intentionallyStopped = stoppingSessionIdsRef.current.delete(event.sessionId);
         const endedSession = sessionsRef.current.find((session) => session.id === event.sessionId);
         notifiedAttentionRef.current.delete(event.sessionId);
@@ -845,6 +875,12 @@ export default function App() {
         await writeTerminal(sessionId, data);
       }
       engagedSessionIdsRef.current.add(sessionId);
+      agentOutputSeenRef.current.delete(sessionId);
+      const idleTimer = turnIdleTimersRef.current[sessionId];
+      if (idleTimer !== undefined) {
+        window.clearTimeout(idleTimer);
+        delete turnIdleTimersRef.current[sessionId];
+      }
       attentionScanRef.current[sessionId] = "";
       notifiedAttentionRef.current.delete(sessionId);
       pendingActivityRef.current.delete(sessionId);
@@ -869,7 +905,7 @@ export default function App() {
         return next;
       });
     }
-  }, [activeSession, prompt]);
+  }, [activeSession, mode, prompt]);
 
   const stopSession = useCallback(async () => {
     if (!activeSession?.connected || stoppingSessionIdsRef.current.has(activeSession.id)) return;
@@ -922,6 +958,12 @@ export default function App() {
     const isResponse = data.includes("\r") || data.includes("\n");
     if (!isResponse) return;
     engagedSessionIdsRef.current.add(sessionId);
+    agentOutputSeenRef.current.delete(sessionId);
+    const idleTimer = turnIdleTimersRef.current[sessionId];
+    if (idleTimer !== undefined) {
+      window.clearTimeout(idleTimer);
+      delete turnIdleTimersRef.current[sessionId];
+    }
     attentionScanRef.current[sessionId] = "";
     notifiedAttentionRef.current.delete(sessionId);
     pendingActivityRef.current.delete(sessionId);

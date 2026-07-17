@@ -30,6 +30,15 @@ describe("session status", () => {
     expect(reduceSessionStatus("attention", { type: "activity" })).toBe("attention");
   });
 
+  it("marks turn completion while the CLI stays open as done", () => {
+    expect(reduceSessionStatus("working", { type: "turn-completed" })).toBe("done");
+    expect(reduceSessionStatus("attention", { type: "turn-completed" })).toBe("attention");
+  });
+
+  it("does not resurrect Working from Done on ordinary TUI repaint activity", () => {
+    expect(reduceSessionStatus("done", { type: "activity" })).toBe("done");
+  });
+
   it("recognizes common interactive prompts after stripping ANSI", () => {
     expect(outputRequestsAttention("\u001b[33mDo you want to proceed? [y/n]\u001b[0m")).toBe(
       true,
