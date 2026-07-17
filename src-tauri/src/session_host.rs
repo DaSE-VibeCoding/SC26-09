@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+mod codex_app_server;
+
 const VERSION: u8 = 2;
 const MAX_ID: usize = 256;
 const MAX_ACTIVITY_KEY: usize = 512;
