@@ -61,4 +61,154 @@ describe("session discovery merge", () => {
       running: true,
     }));
   });
+
+  it("claims an unbound connected Pelican Codex session instead of duplicating", () => {
+    const local: AgentSession = {
+      id: "local-new",
+      workspaceId: workspace.id,
+      agentId: "codex",
+      title: "New Codex session",
+      status: "working",
+      createdAt: "2026-07-17T00:00:00.000Z",
+      lastActivityAt: "2026-07-17T00:00:00.000Z",
+      unread: false,
+      connected: true,
+      running: true,
+      origin: "pelican",
+    };
+    const merged = mergeDiscoveredSessions(
+      [local],
+      [{ ...discovered, title: "what 's in this folder" }],
+      [workspace],
+      () => "should-not-create",
+    );
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toEqual(expect.objectContaining({
+      id: "local-new",
+      title: "what 's in this folder",
+      externalSessionId: "thread-1",
+      resumeHandle: "thread-1",
+      connected: true,
+      running: true,
+      status: "working",
+      origin: "pelican",
+    }));
+  });
+
+  it("folds a pre-existing disconnected history duplicate into the live Pelican PTY", () => {
+    const live: AgentSession = {
+      id: "local-new",
+      workspaceId: workspace.id,
+      agentId: "codex",
+      title: "New Codex session",
+      status: "working",
+      createdAt: "2026-07-17T00:00:00.000Z",
+      lastActivityAt: "2026-07-17T00:00:00.000Z",
+      unread: false,
+      connected: true,
+      running: true,
+      origin: "pelican",
+    };
+    const duplicate: AgentSession = {
+      id: "history-dup",
+      workspaceId: workspace.id,
+      agentId: "codex",
+      title: "what 's in this folder",
+      status: "available",
+      createdAt: "2026-07-17T00:00:00.000Z",
+      lastActivityAt: "2026-07-17T00:01:00.000Z",
+      unread: false,
+      connected: false,
+      running: false,
+      externalSessionId: "thread-1",
+      resumeHandle: "thread-1",
+      origin: "codex-history",
+    };
+    const merged = mergeDiscoveredSessions(
+      [live, duplicate],
+      [{ ...discovered, title: "what 's in this folder" }],
+      [workspace],
+      () => "should-not-create",
+    );
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toEqual(expect.objectContaining({
+      id: "local-new",
+      title: "what 's in this folder",
+      externalSessionId: "thread-1",
+      resumeHandle: "thread-1",
+      connected: true,
+      origin: "pelican",
+    }));
+  });
+
+  it("folds a connected imported duplicate into the live Pelican PTY", () => {
+    const live: AgentSession = {
+      id: "local-new",
+      workspaceId: workspace.id,
+      agentId: "codex",
+      title: "New Codex session",
+      status: "working",
+      createdAt: "2026-07-17T00:00:00.000Z",
+      lastActivityAt: "2026-07-17T00:00:00.000Z",
+      unread: false,
+      connected: true,
+      running: true,
+      origin: "pelican",
+    };
+    const duplicate: AgentSession = {
+      id: "history-dup",
+      workspaceId: workspace.id,
+      agentId: "codex",
+      title: "what 's in this folder",
+      status: "working",
+      createdAt: "2026-07-17T00:00:00.000Z",
+      lastActivityAt: "2026-07-17T00:01:00.000Z",
+      unread: false,
+      connected: true,
+      running: true,
+      externalSessionId: "thread-1",
+      resumeHandle: "thread-1",
+      origin: "codex-history",
+    };
+    const merged = mergeDiscoveredSessions(
+      [live, duplicate],
+      [{ ...discovered, title: "what 's in this folder" }],
+      [workspace],
+      () => "should-not-create",
+    );
+    expect(merged).toHaveLength(1);
+    expect(merged[0].id).toBe("local-new");
+    expect(merged[0].externalSessionId).toBe("thread-1");
+  });
+
+  it("dedupes two rows that already share the same Codex thread id", () => {
+    const first: AgentSession = {
+      id: "a",
+      workspaceId: workspace.id,
+      agentId: "codex",
+      title: "what 's in this folder",
+      status: "working",
+      createdAt: "2026-07-17T00:00:00.000Z",
+      lastActivityAt: "2026-07-17T00:00:00.000Z",
+      unread: false,
+      connected: true,
+      running: true,
+      externalSessionId: "thread-1",
+      resumeHandle: "thread-1",
+      origin: "codex-history",
+    };
+    const second: AgentSession = {
+      ...first,
+      id: "b",
+      createdAt: "2026-07-17T00:00:01.000Z",
+    };
+    const merged = mergeDiscoveredSessions(
+      [first, second],
+      [discovered],
+      [workspace],
+      () => "unused",
+    );
+    expect(merged).toHaveLength(1);
+    expect(merged[0].id).toBe("a");
+  });
 });

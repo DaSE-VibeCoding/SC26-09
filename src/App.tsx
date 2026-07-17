@@ -307,12 +307,22 @@ export default function App() {
     setSessionsRefreshing(true);
     try {
       const discovered = await discoverAgentSessions(workspaces.map((workspace) => workspace.path));
-      setSessions((current) => mergeDiscoveredSessions(
-        current,
-        discovered,
-        workspaces,
-        createId,
-      ));
+      setSessions((current) => {
+        const merged = mergeDiscoveredSessions(
+          current,
+          discovered,
+          workspaces,
+          createId,
+        );
+        const mergedIds = new Set(merged.map((session) => session.id));
+        for (const session of current) {
+          if (session.connected && !mergedIds.has(session.id)) {
+            void stopTerminal(session.id).catch(() => undefined);
+            clearTerminalBuffer(session.id);
+          }
+        }
+        return merged;
+      });
       discoveryErrorRef.current = null;
     } catch (reason) {
       const message = errorMessage(reason);
