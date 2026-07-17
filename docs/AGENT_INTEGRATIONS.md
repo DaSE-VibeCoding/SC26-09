@@ -2,6 +2,12 @@
 
 Codex, Claude Code, and Pi are equal first-class integrations. Pelican normalizes their different protocols into one session model while preserving each CLI's authentication, configuration, and safety behavior.
 
+## Session binding contract
+
+Pelican's approved transport model is one Core-owned active binding per session. The binding may expose an interactive PTY, but does not have to. PTY fallback provides Prompt, Terminal, and fallback lifecycle evidence. Claude's planned PTY-plus-hooks transport keeps Prompt and Terminal on that same binding while structured hooks own lifecycle. Planned Codex app-server and Pi RPC bindings provide Prompt and structured lifecycle without a Terminal surface; Pelican must not emulate one.
+
+The LC-02A frontend slice defines protocol-version-1 semantic requests, snapshots/events, bounded runtime validation, stream ordering, and the optional-terminal capability. It does not parse provider payloads or implement a Rust host. LC-02B must own provider payload conversion, one-active-stream enforcement, control routing, and native integration before any preferred transport below can be described as live. Current sessions continue to use the existing PTY fallback APIs.
+
 ## Codex
 
 Preferred transport: `codex app-server --listen stdio://`, owned by Pelican Core. The adapter uses thread and turn methods for inventory, prompts, interruption, streaming items, diffs, and approval requests. Because app-server is experimental, the adapter must version-probe it and generate schemas from the installed CLI.

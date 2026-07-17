@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentSession, DiscoveredAgentSession, Workspace } from "../domain/models";
-import { mergeDiscoveredSessions } from "./sessionDiscovery";
+import { mergeDiscoveredSessions, selectDiscoveryTerminalCleanupIds } from "./sessionDiscovery";
 
 const workspace: Workspace = {
   id: "workspace-1",
@@ -210,5 +210,30 @@ describe("session discovery merge", () => {
     );
     expect(merged).toHaveLength(1);
     expect(merged[0].id).toBe("a");
+  });
+
+  it("selects only removed connected sessions that are absent from live PTYs for cleanup", () => {
+    const baseSession: AgentSession = {
+      id: "kept",
+      workspaceId: workspace.id,
+      agentId: "codex",
+      title: "Kept",
+      status: "working",
+      createdAt: "2026-07-17T00:00:00.000Z",
+      lastActivityAt: "2026-07-17T00:00:00.000Z",
+      unread: false,
+      connected: true,
+      running: true,
+      origin: "pelican",
+    };
+    const removedConnected = { ...baseSession, id: "removed-connected" };
+    const removedButLive = { ...baseSession, id: "removed-but-live" };
+    const removedDisconnected = { ...baseSession, id: "removed-disconnected", connected: false };
+
+    expect(selectDiscoveryTerminalCleanupIds(
+      [baseSession, removedConnected, removedButLive, removedDisconnected],
+      [baseSession],
+      new Set(["removed-but-live"]),
+    )).toEqual(["removed-connected"]);
   });
 });

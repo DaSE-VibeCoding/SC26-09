@@ -137,6 +137,17 @@ export function mergeDiscoveredSessions(
   return next.sort((left, right) => right.lastActivityAt.localeCompare(left.lastActivityAt));
 }
 
+export function selectDiscoveryTerminalCleanupIds(
+  previous: readonly AgentSession[],
+  committed: readonly AgentSession[],
+  liveIds: ReadonlySet<string>,
+): string[] {
+  const committedIds = new Set(committed.map((session) => session.id));
+  return previous
+    .filter((session) => !committedIds.has(session.id) && session.connected && !liveIds.has(session.id))
+    .map((session) => session.id);
+}
+
 function preferSession(left: AgentSession, right: AgentSession): AgentSession {
   if (left.connected !== right.connected) return left.connected ? left : right;
   if ((left.origin === "pelican") !== (right.origin === "pelican")) {

@@ -48,6 +48,10 @@ Claude-managed `--bg` agents are an optional import mode rather than Pelican's d
 
 The UI requests a session through a typed command. Pelican Core opens a PTY, launches the adapter command in the workspace, and publishes output and lifecycle events. UI views subscribe by session ID, so switching panels never changes process ownership.
 
+Each session has at most one Core-owned active binding. A binding describes either a PTY transport (with fallback or structured lifecycle evidence) or a protocol transport (always structured). A PTY is therefore a capability of a binding, not a requirement of a session: PTY fallback and Claude PTY-plus-hooks expose Prompt and Terminal over the same binding, while future Codex app-server and Pi RPC bindings expose Prompt only. A non-PTY binding must never mount a fake terminal, and every control command carries the active `streamId` so stale clients cannot control a replacement stream.
+
+LC-02A defines the version-1 frontend wire contracts, fail-closed decoders, transport capability helper, and pure aggregate session/lifecycle/stream reducer. It also moves the current PTY fallback lifecycle into one committed React aggregate. The existing Rust PTY commands remain unchanged and are not SessionHost protocol implementations. LC-02B will implement the Core/Rust host, event delivery, replay/control enforcement, and real provider adapters; until then no unified host-event runtime or protocol-only provider session is claimed.
+
 The daemon milestone will add a versioned local-socket protocol and replayable terminal buffers. The desktop app will become a disposable client that can detach and reattach without affecting agents.
 
 ## Pure live-turn lifecycle contract
