@@ -95,7 +95,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 - [x] Remove the optimistic row, restore selection, and alert on spawn failure.
 - [x] A fresh welcome TUI begins `Idle`, not `Working`.
 - [x] Prevent duplicate resume/attach clicks with an immediate in-flight lock.
-- [ ] PARTIAL — Prevent every duplicate new-session launch before React rerenders.
+- [x] Prevent duplicate new-session launches before React rerenders.
 - [ ] MISSING — Wait for an agent-ready handshake before enabling prompt submission.
 - [ ] PARTIAL — Reconcile every new session with its provider ID and saved resume handle.
 

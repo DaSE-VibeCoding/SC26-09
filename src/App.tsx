@@ -43,6 +43,7 @@ import {
   notificationsAreEnabled,
   notify,
 } from "./services/notifications";
+import { runIfNotInFlight } from "./services/actionLock";
 import {
   appendTerminalBuffer,
   clearTerminalBuffer,
@@ -204,6 +205,7 @@ export default function App() {
   const agentOutputSeenRef = useRef(new Set<string>());
   const turnIdleTimersRef = useRef<Record<string, number>>({});
   const sessionDiscoveryInFlightRef = useRef(false);
+  const createSessionInFlightRef = useRef(false);
   const discoveryErrorRef = useRef<string | null>(null);
   const statusFlushTimerRef = useRef<number | null>(null);
   const loadedWorkspaceIdRef = useRef<string | null>(null);
@@ -675,82 +677,79 @@ export default function App() {
   }, []);
 
   const createSession = useCallback(async (agentId: FirstClassAgentId) => {
-    if (!activeWorkspace) {
-      setAgentPickerOpen(false);
-      setError("Add a workspace before starting an agent session.");
-      return;
-    }
-    const adapter = getAgentAdapter(agentId);
-    const installation = installations.find((candidate) => candidate.agentId === agentId);
-    if (!installation?.installed || !installation.executable) {
-      setError(`${adapter.displayName} was not found on PATH.`);
-      return;
-    }
+    await runIfNotInFlight(createSessionInFlightRef, async () => {
+      if (!activeWorkspace) {
+        setAgentPickerOpen(false);
+        setError("Add a workspace before starting an agent session.");
+        return;
+      }
+      const adapter = getAgentAdapter(agentId);
+      const installation = installations.find((candidate) => candidate.agentId === agentId);
+      if (!installation?.installed || !installation.executable) {
+        setError(`${adapter.displayName} was not found on PATH.`);
+        return;
+      }
 
-    const id = createId();
-    const previousActiveSessionId = activeSessionId;
-    const now = new Date().toISOString();
-    const session: AgentSession = {
-      id,
-      workspaceId: activeWorkspace.id,
-      agentId,
-      title: `New ${adapter.displayName} session`,
-      status: "idle",
-      createdAt: now,
-      lastActivityAt: now,
-      unread: false,
-      connected: false,
-      running: false,
-      externalSessionId: agentId === "claude-code" || agentId === "pi" ? id : undefined,
-      resumeHandle: agentId === "claude-code" ? id : undefined,
-      origin: "pelican",
-    };
-    const launch = adapter.buildLaunchSpec(installation.executable, {
-      cwd: activeWorkspace.path,
-      sessionId: id,
-      title: session.title,
-    });
-
-    setSessions((current) => [...current, session]);
-    initializeTerminalBuffer(id);
-    startingSessionIdsRef.current.add(id);
-    setStartingSessionIds((current) => new Set(current).add(id));
-    setActiveSessionId(id);
-    setAgentPickerOpen(false);
-    setMode("prompt");
-
-    try {
-      await spawnTerminal({
-        sessionId: id,
+      const id = createId();
+      const previousActiveSessionId = activeSessionId;
+      const now = new Date().toISOString();
+      const session: AgentSession = {
+        id,
+        workspaceId: activeWorkspace.id,
+        agentId,
+        title: `New ${adapter.displayName} session`,
+        status: "idle",
+        createdAt: now,
+        lastActivityAt: now,
+        unread: false,
+        connected: false,
+        running: false,
+        externalSessionId: agentId === "claude-code" || agentId === "pi" ? id : undefined,
+        resumeHandle: agentId === "claude-code" ? id : undefined,
+        origin: "pelican",
+      };
+      const launch = adapter.buildLaunchSpec(installation.executable, {
         cwd: activeWorkspace.path,
-        program: launch.program,
-        args: launch.args,
-        env: launch.env,
-        rows: 30,
-        cols: 110,
+        sessionId: id,
+        title: session.title,
       });
-      setStartingSessionIds((current) => {
-        const next = new Set(current);
-        next.delete(id);
-        return next;
-      });
-      startingSessionIdsRef.current.delete(id);
-      setSessions((current) => current.map((candidate) => candidate.id === id && !exitedSessionIdsRef.current.has(id)
-        ? { ...candidate, connected: true, running: true }
-        : candidate));
-      queueMicrotask(() => promptRef.current?.focus());
-    } catch (reason) {
-      setStartingSessionIds((current) => {
-        const next = new Set(current);
-        next.delete(id);
-        return next;
-      });
-      startingSessionIdsRef.current.delete(id);
-      setSessions((current) => current.filter((candidate) => candidate.id !== id));
-      clearTerminalBuffer(id);
-      setActiveSessionId((current) => current === id ? previousActiveSessionId : current);
-      setError(`Could not start ${adapter.displayName}: ${errorMessage(reason)}`);
-    }
+
+      setSessions((current) => [...current, session]);
+      initializeTerminalBuffer(id);
+      startingSessionIdsRef.current.add(id);
+      setStartingSessionIds((current) => new Set(current).add(id));
+      setActiveSessionId(id);
+      setAgentPickerOpen(false);
+      setMode("prompt");
+
+      try {
+        await spawnTerminal({
+          sessionId: id,
+          cwd: activeWorkspace.path,
+          program: launch.program,
+          args: launch.args,
+          env: launch.env,
+          rows: 30,
+          cols: 110,
+        });
+        setSessions((current) => current.map((candidate) => candidate.id === id && !exitedSessionIdsRef.current.has(id)
+          ? { ...candidate, connected: true, running: true }
+          : candidate));
+        queueMicrotask(() => promptRef.current?.focus());
+      } catch (reason) {
+        setSessions((current) => current.filter((candidate) => candidate.id !== id));
+        clearTerminalBuffer(id);
+        setActiveSessionId((current) => current === id ? previousActiveSessionId : current);
+        setError(`Could not start ${adapter.displayName}: ${errorMessage(reason)}`);
+      } finally {
+        startingSessionIdsRef.current.delete(id);
+        setStartingSessionIds((current) => {
+          const next = new Set(current);
+          next.delete(id);
+          return next;
+        });
+      }
+    });
   }, [activeSessionId, activeWorkspace, installations]);
 
   const connectSession = useCallback(async (target: AgentSession) => {
@@ -989,6 +988,10 @@ export default function App() {
   const openAgentPicker = useCallback(() => {
     if (!activeWorkspaceRef.current) {
       setError("Add a workspace before starting an agent session.");
+      return;
+    }
+    if (createSessionInFlightRef.current) {
+      setError("Wait for the current session to finish launching.");
       return;
     }
     setAgentPickerOpen(true);
