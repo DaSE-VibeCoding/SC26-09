@@ -24,6 +24,7 @@ import {
   getGitDiff,
   isTauri,
   listWorkspaceFiles,
+  listTerminalSessions,
   onTerminalExit,
   onTerminalOutput,
   spawnTerminal,
@@ -298,6 +299,26 @@ export default function App() {
       .finally(() => {
         if (!cancelled) setAgentsLoading(false);
       });
+    // Rejoin Pelican-owned PTYs that survived a webview reload (Rust host still live).
+    void listTerminalSessions()
+      .then((liveIds) => {
+        if (cancelled || liveIds.length === 0) return;
+        const live = new Set(liveIds);
+        liveIds.forEach((sessionId) => initializeTerminalBuffer(sessionId));
+        setSessions((current) => current.map((session) => (
+          live.has(session.id)
+            ? {
+                ...session,
+                connected: true,
+                running: true,
+                status: session.status === "available" || session.status === "offline"
+                  ? "idle"
+                  : session.status,
+              }
+            : session
+        )));
+      })
+      .catch(() => undefined);
     return () => { cancelled = true; };
   }, []);
 
@@ -306,17 +327,38 @@ export default function App() {
     sessionDiscoveryInFlightRef.current = true;
     setSessionsRefreshing(true);
     try {
-      const discovered = await discoverAgentSessions(workspaces.map((workspace) => workspace.path));
+      const [discovered, liveIds] = await Promise.all([
+        discoverAgentSessions(workspaces.map((workspace) => workspace.path)),
+        listTerminalSessions().catch(() => [] as string[]),
+      ]);
       setSessions((current) => {
+        const live = new Set(liveIds);
+        if (live.size > 0) {
+          liveIds.forEach((sessionId) => initializeTerminalBuffer(sessionId));
+        }
+        const reconnected = live.size === 0
+          ? current
+          : current.map((session) => (
+            live.has(session.id)
+              ? {
+                  ...session,
+                  connected: true,
+                  running: true,
+                  status: session.status === "available" || session.status === "offline"
+                    ? "idle"
+                    : session.status,
+                }
+              : session
+          ));
         const merged = mergeDiscoveredSessions(
-          current,
+          reconnected,
           discovered,
           workspaces,
           createId,
         );
         const mergedIds = new Set(merged.map((session) => session.id));
         for (const session of current) {
-          if (session.connected && !mergedIds.has(session.id)) {
+          if (session.connected && !mergedIds.has(session.id) && !live.has(session.id)) {
             void stopTerminal(session.id).catch(() => undefined);
             clearTerminalBuffer(session.id);
           }
@@ -739,10 +781,25 @@ export default function App() {
           }
         : session));
     } catch (reason) {
-      setSessions((current) => current.map((session) => session.id === target.id
-        ? previous
-        : session));
-      setError(`Could not ${attachSessionId ? "attach to" : "resume"} ${adapter.displayName}: ${errorMessage(reason)}`);
+      const message = errorMessage(reason);
+      // Webview reload leaves the Rust PTY alive; treat "already exists" as reconnect.
+      if (/already exists/i.test(message)) {
+        initializeTerminalBuffer(target.id);
+        setSessions((current) => current.map((session) => session.id === target.id
+          ? {
+              ...session,
+              connected: true,
+              running: true,
+              status: session.status === "available" || session.status === "offline" ? "idle" : session.status,
+              unread: false,
+            }
+          : session));
+      } else {
+        setSessions((current) => current.map((session) => session.id === target.id
+          ? previous
+          : session));
+        setError(`Could not ${attachSessionId ? "attach to" : "resume"} ${adapter.displayName}: ${message}`);
+      }
     } finally {
       startingSessionIdsRef.current.delete(target.id);
       setStartingSessionIds((current) => {

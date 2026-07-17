@@ -9,7 +9,10 @@ use agents::discover_agents;
 use files::list_workspace_files;
 use git::{git_changes, git_diff};
 use sessions::discover_agent_sessions;
-use terminal::{terminal_resize, terminal_spawn, terminal_stop, terminal_write, TerminalManager};
+use terminal::{
+    terminal_list_sessions, terminal_resize, terminal_spawn, terminal_stop, terminal_write,
+    TerminalManager,
+};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -27,6 +30,7 @@ pub fn run() {
             terminal_write,
             terminal_resize,
             terminal_stop,
+            terminal_list_sessions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Pelican");

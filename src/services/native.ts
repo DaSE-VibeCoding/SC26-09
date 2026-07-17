@@ -79,6 +79,12 @@ export async function stopTerminal(sessionId: string): Promise<void> {
   requireTauri("Stopping an agent terminal");
   await invoke("terminal_stop", { sessionId });
 }
+
+export async function listTerminalSessions(): Promise<string[]> {
+  if (!isTauri()) return [];
+  return invoke<string[]>("terminal_list_sessions");
+}
+
 export async function onTerminalOutput(
   callback: (event: TerminalOutputEvent) => void,
 ): Promise<UnlistenFn> {

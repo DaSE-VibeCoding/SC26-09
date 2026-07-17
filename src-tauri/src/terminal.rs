@@ -473,6 +473,15 @@ fn request_terminal_stop(control: Sender<TerminalControl>) -> Result<(), String>
         .map_err(|_| "Timed out while stopping terminal")?
 }
 
+#[tauri::command]
+pub fn terminal_list_sessions(manager: State<'_, TerminalManager>) -> Result<Vec<String>, String> {
+    let sessions = manager
+        .sessions
+        .lock()
+        .map_err(|_| "Terminal state is unavailable")?;
+    Ok(sessions.keys().cloned().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{validate_spawn_request, SpawnTerminalRequest, Utf8StreamDecoder};
