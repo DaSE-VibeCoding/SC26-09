@@ -54,26 +54,26 @@ export function TerminalView({
       lineHeight: 1.35,
       scrollback: 8_000,
       theme: {
-        background: "#061225",
-        foreground: "#dce9f8",
-        cursor: "#28d1d7",
-        selectionBackground: "#2e6f9366",
-        black: "#071326",
-        brightBlack: "#617b96",
-        red: "#ef817d",
-        brightRed: "#ff9c96",
-        green: "#62d4b3",
-        brightGreen: "#83e7c9",
-        yellow: "#e8bd6b",
-        brightYellow: "#ffd184",
-        blue: "#6f9fe1",
-        brightBlue: "#8ab8f2",
-        magenta: "#b99ae7",
-        brightMagenta: "#cfb1f5",
-        cyan: "#31cbd1",
-        brightCyan: "#5ce0e3",
-        white: "#dce9f8",
-        brightWhite: "#f6f9ff",
+        background: "#ffffff",
+        foreground: "#2c2c2c",
+        cursor: "#202020",
+        selectionBackground: "#cfcfca99",
+        black: "#202020",
+        brightBlack: "#666666",
+        red: "#a93232",
+        brightRed: "#d04444",
+        green: "#23734f",
+        brightGreen: "#2d9164",
+        yellow: "#8a6200",
+        brightYellow: "#aa7900",
+        blue: "#385b8f",
+        brightBlue: "#4b72ad",
+        magenta: "#76518f",
+        brightMagenta: "#9166ac",
+        cyan: "#2c6d72",
+        brightCyan: "#398890",
+        white: "#e9e9e6",
+        brightWhite: "#ffffff",
       },
     });
     const fit = new FitAddon();
@@ -85,7 +85,7 @@ export function TerminalView({
     needsReplayRef.current = true;
 
     if (!isTauri()) {
-      terminal.writeln("\x1b[1;36mPelican preview\x1b[0m");
+      terminal.writeln("\x1b[1mPelican preview\x1b[0m");
       terminal.writeln("Native agent sessions start inside the Tauri app.");
       terminal.writeln("");
       terminal.write("\x1b[38;5;243m~/pelican\x1b[0m  ");
