@@ -34,6 +34,7 @@ Current ledger state: no row is **Provider verified** or **Product accepted** ye
 | `3f85c1c` — `fix: mark Done after quiet turn while CLI stays open` | Quiet-output completion fallback exists. | It is fallback only; it is not structured provider completion authority. |
 | `30e74dc` — `fix: prevent duplicate new-session launches` | **DI-05** duplicate-create in-flight lock is fixture verified. | No broader resume/attach/stop lock coverage or product acceptance. |
 | `79d3384` — `fix: rejoin live PTYs after webview reload` | Webview reload can rejoin an in-process PTY. | Durable Core restart/crash recovery does not exist. |
+| `dfdf6c7` — LC-02B SessionHost migration bridge | One in-process SessionHost map, canonical v1 PTY-fallback events, stream-scoped controls, and frontend cutover are fixture verified. | No structured provider transport, daemon/replay, native provider smoke, or product acceptance. |
 
 ## Global stop conditions
 

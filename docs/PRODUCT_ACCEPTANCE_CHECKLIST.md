@@ -24,7 +24,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 | Left sidebar organizes workspaces, agents, sessions | Partial | Workspaces and sessions have agent logos, status text, unread state, and shortcuts. There is no independent collapse, grouping/filtering, global attention inbox, rename, archive, or pinning. |
 | Right sidebar shows files and Git context | Substantially implemented | File list, modified files, staged/unstaged/untracked diffs, refresh, empty, and error states exist. Folder interaction, file open/search, non-Git labeling, and richer diff feedback remain. |
 | Friendly command interface | Partial | The composer sends text to the connected PTY and preserves drafts. It has no conversation transcript, tool progress, approvals, structured streaming, readiness handshake, or turn-level interrupt. |
-| Integrated terminal and direct control | Implemented for Pelican-owned PTYs | PTY spawn, input, resize, stop, replay, and bounded buffering work. External Codex/Pi foreground terminals cannot be reattached at the OS PTY level. |
+| Integrated terminal and direct control | Implemented for Pelican-owned PTYs | The in-process SessionHost owns PTY spawn, stream-scoped input/resize/stop, ordered events, and bounded UI buffering. External Codex/Pi foreground terminals cannot be reattached at the OS PTY level. |
 | Native notifications | Partial | Permission UI and focus-aware attention/process-exit notifications exist. Normal task completion is not known reliably while an interactive CLI remains open. |
 | Keyboard-first operation | Partial | Command palette and core shortcuts exist. Complete panel navigation, lifecycle actions, file-tree navigation, customization, and accessibility validation are missing. |
 
