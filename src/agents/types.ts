@@ -2,6 +2,9 @@ export const FIRST_CLASS_AGENT_IDS = ["codex", "claude-code", "pi"] as const;
 
 export type FirstClassAgentId = (typeof FIRST_CLASS_AGENT_IDS)[number];
 
+export type AgentStructuredTransport = "app-server" | "hooks" | "rpc";
+export type AgentBindingKind = "pty-fallback" | AgentStructuredTransport;
+
 export interface AgentLaunchContext {
   cwd: string;
   sessionId: string;
@@ -24,11 +27,9 @@ export interface AgentAdapter {
   description: string;
   accent: string;
   capabilities: {
-    preferredTransport: "app-server" | "hooks" | "rpc";
-    /** True only when the capability is wired into the current runtime. */
-    structuredLifecycle: boolean;
+    preferredTransport: AgentStructuredTransport;
+    supportedBindings: readonly AgentBindingKind[];
     resumable: boolean;
-    ptyFallback: boolean;
   };
   /** Compatibility path used until the preferred structured transport is active. */
   buildLaunchSpec(executable: string, context: AgentLaunchContext): AgentLaunchSpec;

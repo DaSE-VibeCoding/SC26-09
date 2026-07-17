@@ -5,6 +5,7 @@ import { AgentLogo } from "./components/AgentLogo";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
 import { Icon } from "./components/Icon";
 import { PelicanLogo } from "./components/PelicanLogo";
+import { PromptComposer } from "./components/PromptComposer";
 import { StatusDot } from "./components/StatusDot";
 import { TerminalView } from "./components/TerminalView";
 import type {
@@ -26,6 +27,10 @@ import {
   reduceSessionRuntime,
   type SessionRuntimeState,
 } from "./domain/sessionRuntime";
+import {
+  buildPromptSendRequests,
+  selectPromptAvailability,
+} from "./domain/sessionPrompt";
 import { reduceSessionStatus, scanTerminalAttention, TURN_IDLE_MS } from "./domain/status";
 import {
   chooseWorkspace,
@@ -270,6 +275,8 @@ export default function App() {
   const activeSessionStarting = activeSession ? startingSessionIds.has(activeSession.id) : false;
   const activeSessionStopping = activeSession ? stoppingSessionIds.has(activeSession.id) : false;
   const activeSessionSending = activeSession ? sendingSessionIds.has(activeSession.id) : false;
+  const activeSessionConnection = activeSession ? connectionFor(activeSession.id) : undefined;
+  const activePromptAvailability = selectPromptAvailability(activeSession, activeSessionConnection);
   const activeSessionCanAttach = Boolean(
     activeSession && !activeSession.connected && activeSession.running && activeSession.attachHandle,
   );
@@ -865,66 +872,60 @@ export default function App() {
   const sendPrompt = useCallback(async () => {
     if (!activeSession || !prompt.trim()) return;
     const sessionId = activeSession.id;
+    const connection = connectionFor(sessionId);
+    const availability = selectPromptAvailability(activeSession, connection);
+    if (!availability.canSend) {
+      setError(availability.message);
+      return;
+    }
     if (sendingSessionIdsRef.current.has(sessionId)) return;
     if (stoppingSessionIdsRef.current.has(sessionId)) return;
-    if (!activeSession.connected) {
-      setError("Connect or resume this session before sending a prompt.");
+    const requests = buildPromptSendRequests(activeSession, connection, prompt);
+    if (requests.length === 0) {
+      setError(availability.message);
       return;
     }
 
     // Trim so a trailing Enter in the composer does not force bracketed-paste
     // mode, which leaves Codex waiting for a manual terminal Enter to submit.
     const submittedPrompt = prompt.trim();
-    const multiline = submittedPrompt.includes("\n");
-    const data = multiline
-      ? `\x1b[200~${submittedPrompt}\x1b[201~\r`
-      : `${submittedPrompt}\r`;
     sendingSessionIdsRef.current.add(sessionId);
     setSendingSessionIds((current) => new Set(current).add(sessionId));
     setDrafts((current) => current[sessionId] === prompt
       ? { ...current, [sessionId]: "" }
       : current);
     try {
-      if (activeSession.agentId === "codex") {
-        // Write the line and the Enter separately. A single bulk `text\r` often
-        // lands in Codex's composer without submitting until a later Enter.
-        const streamId = connectionFor(sessionId)?.streamId;
-        if (!streamId) throw new Error("Session stream is unavailable");
-        await sendSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId, streamId, input: { type: "terminal", data: multiline ? `\x1b[200~${submittedPrompt}\x1b[201~` : submittedPrompt } });
-        await sendSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId, streamId, input: { type: "terminal", data: "\r" } });
-      } else {
-        const streamId = connectionFor(sessionId)?.streamId;
-        if (!streamId) throw new Error("Session stream is unavailable");
-        await sendSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId, streamId, input: { type: "terminal", data } });
+      for (const request of requests) await sendSession(request);
+      if (availability.authority === "pty-fallback") {
+        engagedSessionIdsRef.current.add(sessionId);
+        agentOutputSeenRef.current.delete(sessionId);
+        const idleTimer = turnIdleTimersRef.current[sessionId];
+        if (idleTimer !== undefined) {
+          window.clearTimeout(idleTimer);
+          delete turnIdleTimersRef.current[sessionId];
+        }
+        attentionScanRef.current[sessionId] = "";
+        notifiedAttentionRef.current.delete(sessionId);
+        pendingActivityRef.current.delete(sessionId);
+        delete pendingAttentionRef.current[sessionId];
+        setSessionRuntime((current) => (
+          exitedSessionIdsRef.current.has(sessionId) || stoppingSessionIdsRef.current.has(sessionId)
+            ? current
+            : (() => {
+              const currentSession = current.sessions.find((session) => session.id === sessionId);
+              if (!currentSession) return current;
+              return reduceSessionRuntime(current, {
+                type: "activity", sessionId, events: FALLBACK_SUBMISSION_EVENTS,
+                patch: {
+                  unread: false,
+                  title: currentSession.title.startsWith("New ")
+                    ? submittedPrompt.slice(0, 96)
+                    : currentSession.title,
+                },
+              });
+            })()
+        ));
       }
-      engagedSessionIdsRef.current.add(sessionId);
-      agentOutputSeenRef.current.delete(sessionId);
-      const idleTimer = turnIdleTimersRef.current[sessionId];
-      if (idleTimer !== undefined) {
-        window.clearTimeout(idleTimer);
-        delete turnIdleTimersRef.current[sessionId];
-      }
-      attentionScanRef.current[sessionId] = "";
-      notifiedAttentionRef.current.delete(sessionId);
-      pendingActivityRef.current.delete(sessionId);
-      delete pendingAttentionRef.current[sessionId];
-      setSessionRuntime((current) => (
-        exitedSessionIdsRef.current.has(sessionId) || stoppingSessionIdsRef.current.has(sessionId)
-          ? current
-          : (() => {
-            const currentSession = current.sessions.find((session) => session.id === sessionId);
-            if (!currentSession) return current;
-            return reduceSessionRuntime(current, {
-              type: "activity", sessionId, events: FALLBACK_SUBMISSION_EVENTS,
-              patch: {
-                unread: false,
-                title: currentSession.title.startsWith("New ")
-                  ? submittedPrompt.slice(0, 96)
-                  : currentSession.title,
-              },
-            });
-          })()
-      ));
     } catch (reason) {
       setDrafts((current) => current[sessionId]
         ? current
@@ -938,7 +939,7 @@ export default function App() {
         return next;
       });
     }
-  }, [activeSession, mode, prompt]);
+  }, [activeSession, sessionRuntime.connectionBySessionId, prompt]);
 
   const stopSession = useCallback(async () => {
     if (!activeSession?.connected || stoppingSessionIdsRef.current.has(activeSession.id)) return;
@@ -1343,26 +1344,17 @@ export default function App() {
                       </span>
                     </div>
                   ) : (
-                    <div className="composer">
-                      <textarea
-                        ref={promptRef}
-                        value={prompt}
-                        onChange={(event) => setPrompt(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter" && event.metaKey) {
-                            event.preventDefault();
-                            void sendPrompt();
-                          }
-                        }}
-                        placeholder={activeSession.status === "attention"
-                          ? `Reply to ${getAgentAdapter(activeSession.agentId).displayName}…`
-                          : `Give ${getAgentAdapter(activeSession.agentId).displayName} a task…`}
-                      />
-                      <div className="composer-footer">
-                        <span>⌘Enter to send · Enter for newline</span>
-                        <button type="button" onClick={() => void sendPrompt()} disabled={!prompt.trim() || activeSessionSending}>{activeSessionSending ? "Sending…" : "Send"}</button>
-                      </div>
-                    </div>
+                    <PromptComposer
+                      ref={promptRef}
+                      value={prompt}
+                      agentName={getAgentAdapter(activeSession.agentId).displayName}
+                      attention={activeSession.status === "attention"}
+                      sending={activeSessionSending}
+                      blocked={!activePromptAvailability.canSend}
+                      readinessMessage={activePromptAvailability.message}
+                      onChange={setPrompt}
+                      onSend={() => void sendPrompt()}
+                    />
                   )}
                 </div>
               )}

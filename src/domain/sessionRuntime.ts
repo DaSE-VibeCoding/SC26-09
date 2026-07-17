@@ -15,12 +15,17 @@ import {
   reviewSessionLifecycle,
   type LiveSessionInitializationMode,
 } from "./sessionLifecycle";
+import {
+  initialPromptReadinessForTransport,
+  type PromptReadinessState,
+} from "./sessionPrompt";
 import { reduceSessionStatus } from "./status";
 
 export interface SessionConnectionSnapshot {
   readonly streamId: string;
   readonly transport: SessionTransportDescriptor;
   readonly open: boolean;
+  readonly promptReadiness: PromptReadinessState;
   readonly source?: StructuredLifecycleSource;
   readonly currentTurn?: StructuredTurnIdentity;
   readonly pendingAttentionKeys?: readonly string[];
@@ -117,6 +122,9 @@ export function reduceSessionRuntime(state: SessionRuntimeState, action: Session
             streamId: snapshot.streamId,
             transport: snapshot.transport,
             open: true,
+            promptReadiness: connection?.streamId === snapshot.streamId
+              ? connection.promptReadiness
+              : initialPromptReadinessForTransport(snapshot.transport),
             source: transportSource(snapshot.transport),
             currentTurn: connection?.streamId === snapshot.streamId ? connection.currentTurn : undefined,
             pendingAttentionKeys: connection?.streamId === snapshot.streamId ? connection.pendingAttentionKeys : undefined,
@@ -162,6 +170,7 @@ function reduceHostEvent(state: SessionRuntimeState, envelope: SessionEventEnvel
           streamId: envelope.streamId,
           transport: envelope.event.transport,
           open: true,
+          promptReadiness: initialPromptReadinessForTransport(envelope.event.transport),
           source: transportSource(envelope.event.transport),
         },
       },

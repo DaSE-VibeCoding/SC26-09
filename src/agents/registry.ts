@@ -9,9 +9,8 @@ const codex: AgentAdapter = {
   accent: "#7ee2b8",
   capabilities: {
     preferredTransport: "app-server",
-    structuredLifecycle: false,
+    supportedBindings: ["pty-fallback"],
     resumable: true,
-    ptyFallback: true,
   },
   buildLaunchSpec(executable, context) {
     return {
@@ -33,9 +32,8 @@ const claudeCode: AgentAdapter = {
   accent: "#e6a978",
   capabilities: {
     preferredTransport: "hooks",
-    structuredLifecycle: false,
+    supportedBindings: ["pty-fallback"],
     resumable: true,
-    ptyFallback: true,
   },
   buildLaunchSpec(executable, context) {
     return {
@@ -59,9 +57,8 @@ const pi: AgentAdapter = {
   accent: "#c7a6ff",
   capabilities: {
     preferredTransport: "rpc",
-    structuredLifecycle: false,
+    supportedBindings: ["pty-fallback"],
     resumable: true,
-    ptyFallback: true,
   },
   buildLaunchSpec(executable, context) {
     return {

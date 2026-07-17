@@ -80,11 +80,50 @@ describe("session runtime reducer", () => {
       snapshot: { protocolVersion: 2, sessionId: "s", streamId: "stream-1", lastSequence: 4, transport: { type: "pty", lifecycleEvidence: "fallback" } },
     });
     expect(snapshotState.sessions[0]).toEqual(expect.objectContaining({ connected: true, running: true }));
+    expect(snapshotState.connectionBySessionId.s.promptReadiness).toBe("pty-fallback-sendable");
 
     const openedState = reduceSessionRuntime(createSessionRuntimeState([
       session({ status: "offline", connected: false, running: false }),
     ]), { type: "host-event", envelope: fallbackOpened() });
     expect(openedState.sessions[0]).toEqual(expect.objectContaining({ connected: true, running: true }));
+    expect(openedState.connectionBySessionId.s.promptReadiness).toBe("pty-fallback-sendable");
+  });
+
+  it("initializes structured prompt readiness as awaiting authoritative provider readiness", () => {
+    const protocolState = reduceSessionRuntime(createSessionRuntimeState([session()]), { type: "host-event", envelope: structuredOpened() });
+    expect(protocolState.connectionBySessionId.s.promptReadiness).toBe("awaiting-authoritative");
+
+    const ptyState = reduceSessionRuntime(createSessionRuntimeState([session({ agentId: "claude-code" })]), { type: "host-event", envelope: claudePtyOpened() });
+    expect(ptyState.connectionBySessionId.s.promptReadiness).toBe("awaiting-authoritative");
+  });
+
+  it("preserves same-stream prompt readiness across snapshots and resets replacement streams", () => {
+    const opened = reduceSessionRuntime(createSessionRuntimeState([session()]), { type: "host-event", envelope: structuredOpened() });
+    const ready = {
+      ...opened,
+      connectionBySessionId: {
+        ...opened.connectionBySessionId,
+        s: { ...opened.connectionBySessionId.s, promptReadiness: "ready" as const },
+      },
+    };
+
+    const sameStream = reduceSessionRuntime(ready, {
+      type: "host-snapshot",
+      snapshot: { protocolVersion: 2, sessionId: "s", streamId: "stream-1", lastSequence: 0, transport: { type: "protocol", lifecycleEvidence: "structured", source: handshakeSource } },
+    });
+    expect(sameStream.connectionBySessionId.s.promptReadiness).toBe("ready");
+
+    const replacement = reduceSessionRuntime(sameStream, {
+      type: "host-snapshot",
+      snapshot: { protocolVersion: 2, sessionId: "s", streamId: "stream-2", lastSequence: 0, transport: { type: "pty", lifecycleEvidence: "fallback" } },
+    });
+    expect(replacement.connectionBySessionId.s).toEqual(expect.objectContaining({
+      streamId: "stream-2",
+      promptReadiness: "pty-fallback-sendable",
+      currentTurn: undefined,
+      pendingAttentionKeys: undefined,
+      turnCompleted: undefined,
+    }));
   });
 
   it("rejects protocol terminal output without changing state or advancing the cursor", () => {

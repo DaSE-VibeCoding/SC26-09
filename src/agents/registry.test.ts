@@ -51,14 +51,19 @@ describe("agent registry", () => {
     ).toEqual(["--session-id", "pelican-session", "--name", "Test session"]);
   });
 
-  it("gives every first-class adapter a structured preferred transport and PTY fallback", () => {
+  it("gives every first-class adapter a structured preferred transport and only the current PTY fallback binding", () => {
     expect(agentRegistry.map((agent) => agent.capabilities.preferredTransport)).toEqual([
       "app-server",
       "hooks",
       "rpc",
     ]);
-    expect(agentRegistry.every((agent) => agent.capabilities.ptyFallback)).toBe(true);
-    expect(agentRegistry.every((agent) => !agent.capabilities.structuredLifecycle)).toBe(true);
+    expect(agentRegistry.map((agent) => agent.capabilities.supportedBindings)).toEqual([
+      ["pty-fallback"],
+      ["pty-fallback"],
+      ["pty-fallback"],
+    ]);
     expect(agentRegistry.every((agent) => agent.capabilities.resumable)).toBe(true);
+    expect(agentRegistry.every((agent) => "structuredLifecycle" in agent.capabilities)).toBe(false);
+    expect(agentRegistry.every((agent) => "ptyFallback" in agent.capabilities)).toBe(false);
   });
 });
