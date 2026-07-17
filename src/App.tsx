@@ -753,17 +753,30 @@ export default function App() {
       return;
     }
 
-    const submittedPrompt = prompt;
-    const data = submittedPrompt.includes("\n")
+    // Trim so a trailing Enter in the composer does not force bracketed-paste
+    // mode, which leaves Codex waiting for a manual terminal Enter to submit.
+    const submittedPrompt = prompt.trim();
+    const multiline = submittedPrompt.includes("\n");
+    const data = multiline
       ? `\x1b[200~${submittedPrompt}\x1b[201~\r`
       : `${submittedPrompt}\r`;
     sendingSessionIdsRef.current.add(sessionId);
     setSendingSessionIds((current) => new Set(current).add(sessionId));
-    setDrafts((current) => current[sessionId] === submittedPrompt
+    setDrafts((current) => current[sessionId] === prompt
       ? { ...current, [sessionId]: "" }
       : current);
     try {
-      await writeTerminal(sessionId, data);
+      if (activeSession.agentId === "codex") {
+        // Write the line and the Enter separately. A single bulk `text\r` often
+        // lands in Codex's composer without submitting until a later Enter.
+        await writeTerminal(
+          sessionId,
+          multiline ? `\x1b[200~${submittedPrompt}\x1b[201~` : submittedPrompt,
+        );
+        await writeTerminal(sessionId, "\r");
+      } else {
+        await writeTerminal(sessionId, data);
+      }
       engagedSessionIdsRef.current.add(sessionId);
       attentionScanRef.current[sessionId] = "";
       notifiedAttentionRef.current.delete(sessionId);
@@ -774,7 +787,7 @@ export default function App() {
         && !exitedSessionIdsRef.current.has(sessionId)
         && !stoppingSessionIdsRef.current.has(sessionId)
       )
-        ? { ...session, status: "working", unread: false }
+        ? { ...session, status: "working", unread: false, title: session.title.startsWith("New ") ? submittedPrompt.slice(0, 96) : session.title }
         : session));
     } catch (reason) {
       setDrafts((current) => current[sessionId]
