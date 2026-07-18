@@ -50,8 +50,8 @@ Do not mark **unified real-time agent management** complete until the golden wor
 | Saved-session inventory | App-server thread list, partial | Transcript scan, partial | JSONL scan, partial |
 | Resume saved history | `codex resume`, implemented path | `--resume`, implemented path | `--session <absolute path>`, implemented path |
 | Attach a live external session | Not for arbitrary TUI | Background `claude attach` only | Not for arbitrary TUI |
-| Authoritative live lifecycle | Fixture foundation only (CX-01A/LC-02D; no production binding) | Missing | Fixture foundation only (PI-01A serialized prompt/settlement subset; no production binding) |
-| Authoritative prompt readiness producer | Host channel only; provider producer missing | Host channel only; provider producer missing | Host channel only; provider producer missing |
+| Authoritative live lifecycle | Private decoder/supervisor foundation only; no production binding | Missing | Fixture foundation only (PI-01A serialized prompt/settlement subset; no production binding) |
+| Authoritative prompt readiness producer | Private handshake path verified; no production binding | Host channel only; provider producer missing | Host channel only; provider producer missing |
 | Target structured transport | Long-lived app-server | Lifecycle hooks/background inventory | RPC or extension events |
 
 ## Implementation checklist by workflow
