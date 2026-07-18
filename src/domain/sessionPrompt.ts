@@ -1,18 +1,13 @@
 import type { AgentSession } from "./models";
 import {
   SESSION_HOST_PROTOCOL_VERSION,
+  type PromptReadinessState,
   type SessionSendRequest,
   type StructuredLifecycleSource,
 } from "./sessionHost";
 import type { SessionConnectionSnapshot } from "./sessionRuntime";
 
-export type PromptReadinessState =
-  | "pty-fallback-sendable"
-  | "awaiting-authoritative"
-  | "ready"
-  | "auth-required"
-  | "setup-required"
-  | "unsupported";
+export type { PromptReadinessState } from "./sessionHost";
 
 export type PromptAuthority = "pty-fallback" | "provider-ready";
 

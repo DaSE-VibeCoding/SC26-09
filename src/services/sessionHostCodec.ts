@@ -1,6 +1,8 @@
 import {
+  PROMPT_READINESS_STATES,
   SESSION_HOST_PROTOCOL_VERSION,
   type HostedSessionSnapshot,
+  type PromptReadinessState,
   type SessionEventEnvelope,
   type SessionHostEvent,
   type StructuredActivityContext,
@@ -64,6 +66,10 @@ function turnProvenance(value: unknown): StructuredTurnProvenance {
   return literalOneOf(value, "turn provenance", ["provider-turn", "provider-prompt", "adapter-stream"]);
 }
 
+function promptReadiness(value: unknown): PromptReadinessState {
+  return literalOneOf(value, "prompt readiness", PROMPT_READINESS_STATES);
+}
+
 function structuredActivityEvidence(value: unknown): "structured" {
   if (value !== "structured") throw new Error("Host activity evidence must be structured");
   return "structured";
@@ -116,6 +122,18 @@ function transport(value: unknown): SessionTransportDescriptor {
   throw new Error("Unknown or malformed transport variant");
 }
 
+function requirePromptReadinessMatchesTransport(
+  descriptor: SessionTransportDescriptor,
+  readiness: PromptReadinessState,
+): void {
+  const fallback = descriptor.type === "pty" && descriptor.lifecycleEvidence === "fallback";
+  if (fallback) {
+    if (readiness !== "pty-fallback-sendable") throw new Error("Prompt readiness does not match transport");
+    return;
+  }
+  if (readiness === "pty-fallback-sendable") throw new Error("Prompt readiness does not match transport");
+}
+
 function activity(value: unknown): TransportActivityEvent {
   const input = record(value, "activity");
   const type = literalString(input.type, "activity type");
@@ -155,9 +173,20 @@ function event(value: unknown): SessionHostEvent {
   const input = record(value, "event");
   const type = literalString(input.type, "event type");
   switch (type) {
-    case "opened":
-      exactKeys(input, ["type", "transport"], "opened event");
-      return { type: "opened", transport: transport(input.transport) };
+    case "opened": {
+      exactKeys(input, ["type", "transport", "promptReadiness"], "opened event");
+      const descriptor = transport(input.transport);
+      const readiness = promptReadiness(input.promptReadiness);
+      requirePromptReadinessMatchesTransport(descriptor, readiness);
+      return { type: "opened", transport: descriptor, promptReadiness: readiness };
+    }
+    case "prompt-readiness-changed":
+      exactKeys(input, ["type", "source", "promptReadiness"], "prompt readiness event");
+      return {
+        type: "prompt-readiness-changed",
+        source: source(input.source),
+        promptReadiness: promptReadiness(input.promptReadiness),
+      };
     case "activity":
       exactKeys(input, ["type", "source", "context", "activity"], "activity event");
       return { type: "activity", source: source(input.source), context: activityContext(input.context), activity: activity(input.activity) };
@@ -186,14 +215,18 @@ function event(value: unknown): SessionHostEvent {
 
 export function decodeHostedSessionSnapshot(value: unknown): HostedSessionSnapshot {
   const input = record(value, "snapshot");
-  exactKeys(input, ["protocolVersion", "sessionId", "streamId", "lastSequence", "transport"], "snapshot");
+  exactKeys(input, ["protocolVersion", "sessionId", "streamId", "lastSequence", "transport", "promptReadiness"], "snapshot");
   version(input.protocolVersion);
+  const descriptor = transport(input.transport);
+  const readiness = promptReadiness(input.promptReadiness);
+  requirePromptReadinessMatchesTransport(descriptor, readiness);
   return {
     protocolVersion: SESSION_HOST_PROTOCOL_VERSION,
     sessionId: boundedString(input.sessionId, "sessionId", SESSION_HOST_MAX_ID_LENGTH),
     streamId: boundedString(input.streamId, "streamId", SESSION_HOST_MAX_ID_LENGTH),
     lastSequence: sequence(input.lastSequence, "lastSequence"),
-    transport: transport(input.transport),
+    transport: descriptor,
+    promptReadiness: readiness,
   };
 }
 

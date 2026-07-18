@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentSession } from "./models";
 import { createSessionRuntimeState, reduceSessionRuntime } from "./sessionRuntime";
-import type { SessionEventEnvelope, StructuredLifecycleSource, StructuredTurnIdentity } from "./sessionHost";
+import { SESSION_HOST_PROTOCOL_VERSION, type PromptReadinessState, type SessionEventEnvelope, type StructuredLifecycleSource, type StructuredTurnIdentity } from "./sessionHost";
 
 const session = (overrides: Partial<AgentSession> = {}): AgentSession => ({
   id: "s", workspaceId: "w", agentId: "codex", title: "Session", status: "idle",
@@ -24,11 +24,16 @@ const claudeSource: StructuredLifecycleSource = {
 const turn: StructuredTurnIdentity = { key: "turn-1", provenance: "provider-turn" };
 const otherTurn: StructuredTurnIdentity = { key: "turn-2", provenance: "provider-turn" };
 const envelope = (sequence: number, event: SessionEventEnvelope["event"], streamId = "stream-1"): SessionEventEnvelope => ({
-  protocolVersion: 3, sessionId: "s", streamId, sequence, event,
+  protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId: "s", streamId, sequence, event,
 });
-const fallbackOpened = (streamId = "stream-1") => envelope(0, { type: "opened", transport: { type: "pty", lifecycleEvidence: "fallback" } }, streamId);
-const structuredOpened = (streamId = "stream-1", openSource: StructuredLifecycleSource = handshakeSource) => envelope(0, { type: "opened", transport: { type: "protocol", lifecycleEvidence: "structured", source: openSource } }, streamId);
-const claudePtyOpened = (streamId = "stream-1") => envelope(0, { type: "opened", transport: { type: "pty", lifecycleEvidence: "structured", source: claudeSource } }, streamId);
+const fallbackOpened = (streamId = "stream-1") => envelope(0, { type: "opened", transport: { type: "pty", lifecycleEvidence: "fallback" }, promptReadiness: "pty-fallback-sendable" }, streamId);
+const structuredOpened = (streamId = "stream-1", openSource: StructuredLifecycleSource = handshakeSource) => envelope(0, { type: "opened", transport: { type: "protocol", lifecycleEvidence: "structured", source: openSource }, promptReadiness: "awaiting-authoritative" }, streamId);
+const claudePtyOpened = (streamId = "stream-1") => envelope(0, { type: "opened", transport: { type: "pty", lifecycleEvidence: "structured", source: claudeSource }, promptReadiness: "awaiting-authoritative" }, streamId);
+const readinessChanged = (
+  sequence: number,
+  promptReadiness: PromptReadinessState,
+  eventSource: StructuredLifecycleSource = source,
+) => envelope(sequence, { type: "prompt-readiness-changed", source: eventSource, promptReadiness });
 const activity = (
   sequence: number,
   activity: Extract<SessionEventEnvelope["event"], { type: "activity" }>["activity"],
@@ -77,7 +82,7 @@ describe("session runtime reducer", () => {
       session({ status: "available", connected: false, running: false }),
     ]), {
       type: "host-snapshot",
-      snapshot: { protocolVersion: 3, sessionId: "s", streamId: "stream-1", lastSequence: 4, transport: { type: "pty", lifecycleEvidence: "fallback" } },
+      snapshot: { protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId: "s", streamId: "stream-1", lastSequence: 4, transport: { type: "pty", lifecycleEvidence: "fallback" }, promptReadiness: "pty-fallback-sendable" },
     });
     expect(snapshotState.sessions[0]).toEqual(expect.objectContaining({ connected: true, running: true }));
     expect(snapshotState.connectionBySessionId.s.promptReadiness).toBe("pty-fallback-sendable");
@@ -97,7 +102,57 @@ describe("session runtime reducer", () => {
     expect(ptyState.connectionBySessionId.s.promptReadiness).toBe("awaiting-authoritative");
   });
 
-  it("preserves same-stream prompt readiness across snapshots and resets replacement streams", () => {
+  it("applies ordered host prompt readiness changes and rejects duplicate or mismatched updates before cursor advancement", () => {
+    let state = reduceSessionRuntime(createSessionRuntimeState([session()]), { type: "host-event", envelope: structuredOpened() });
+
+    state = reduceSessionRuntime(state, { type: "host-event", envelope: readinessChanged(1, "ready") });
+    expect(state.connectionBySessionId.s.promptReadiness).toBe("ready");
+    expect(state.cursorBySessionId.s).toBe(1);
+
+    const duplicate = reduceSessionRuntime(state, { type: "host-event", envelope: readinessChanged(2, "ready") });
+    expect(duplicate).toBe(state);
+    expect(duplicate.cursorBySessionId.s).toBe(1);
+
+    const mismatchedSource = reduceSessionRuntime(state, { type: "host-event", envelope: readinessChanged(2, "auth-required", { ...source, providerSessionId: "other-thread" }) });
+    expect(mismatchedSource).toBe(state);
+    expect(mismatchedSource.cursorBySessionId.s).toBe(1);
+
+    const mismatchedAgent = reduceSessionRuntime(state, { type: "host-event", envelope: readinessChanged(2, "auth-required", { ...source, agentId: "pi", integration: "rpc" }) });
+    expect(mismatchedAgent).toBe(state);
+    expect(mismatchedAgent.cursorBySessionId.s).toBe(1);
+
+    const mismatchedIntegration = reduceSessionRuntime(state, { type: "host-event", envelope: readinessChanged(2, "auth-required", { ...source, integration: "hooks" }) });
+    expect(mismatchedIntegration).toBe(state);
+    expect(mismatchedIntegration.cursorBySessionId.s).toBe(1);
+
+    const transportMismatch = reduceSessionRuntime(state, { type: "host-event", envelope: readinessChanged(2, "pty-fallback-sendable") });
+    expect(transportMismatch).toBe(state);
+    expect(transportMismatch.cursorBySessionId.s).toBe(1);
+
+    const stale = reduceSessionRuntime(state, { type: "host-event", envelope: readinessChanged(1, "auth-required") });
+    expect(stale).toBe(state);
+    expect(stale.cursorBySessionId.s).toBe(1);
+
+    state = reduceSessionRuntime(state, { type: "host-event", envelope: readinessChanged(2, "auth-required") });
+    expect(state.connectionBySessionId.s.promptReadiness).toBe("auth-required");
+    expect(state.cursorBySessionId.s).toBe(2);
+  });
+
+  it("keeps PTY fallback readiness host-owned, providerReady-false, and unpromotable by structured updates", () => {
+    let state = reduceSessionRuntime(createSessionRuntimeState([session()]), { type: "host-event", envelope: fallbackOpened() });
+    const rejected = reduceSessionRuntime(state, { type: "host-event", envelope: readinessChanged(1, "ready") });
+
+    expect(rejected).toBe(state);
+    expect(rejected.connectionBySessionId.s.promptReadiness).toBe("pty-fallback-sendable");
+    expect(rejected.cursorBySessionId.s).toBe(0);
+
+    state = reduceSessionRuntime(state, { type: "host-event", envelope: envelope(1, { type: "closed", outcome: { type: "exited", success: true } }) });
+    const closed = reduceSessionRuntime(state, { type: "host-event", envelope: readinessChanged(2, "ready") });
+    expect(closed).toBe(state);
+    expect(closed.cursorBySessionId.s).toBe(1);
+  });
+
+  it("restores host prompt readiness from snapshots and resets replacement streams", () => {
     const opened = reduceSessionRuntime(createSessionRuntimeState([session()]), { type: "host-event", envelope: structuredOpened() });
     const ready = {
       ...opened,
@@ -109,13 +164,13 @@ describe("session runtime reducer", () => {
 
     const sameStream = reduceSessionRuntime(ready, {
       type: "host-snapshot",
-      snapshot: { protocolVersion: 3, sessionId: "s", streamId: "stream-1", lastSequence: 0, transport: { type: "protocol", lifecycleEvidence: "structured", source: handshakeSource } },
+      snapshot: { protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId: "s", streamId: "stream-1", lastSequence: 0, transport: { type: "protocol", lifecycleEvidence: "structured", source: handshakeSource }, promptReadiness: "awaiting-authoritative" },
     });
-    expect(sameStream.connectionBySessionId.s.promptReadiness).toBe("ready");
+    expect(sameStream.connectionBySessionId.s.promptReadiness).toBe("awaiting-authoritative");
 
     const replacement = reduceSessionRuntime(sameStream, {
       type: "host-snapshot",
-      snapshot: { protocolVersion: 3, sessionId: "s", streamId: "stream-2", lastSequence: 0, transport: { type: "pty", lifecycleEvidence: "fallback" } },
+      snapshot: { protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId: "s", streamId: "stream-2", lastSequence: 0, transport: { type: "pty", lifecycleEvidence: "fallback" }, promptReadiness: "pty-fallback-sendable" },
     });
     expect(replacement.connectionBySessionId.s).toEqual(expect.objectContaining({
       streamId: "stream-2",
@@ -124,6 +179,9 @@ describe("session runtime reducer", () => {
       pendingAttentionKeys: undefined,
       terminalOutcome: undefined,
     }));
+    const staleOldStreamReadiness = reduceSessionRuntime(replacement, { type: "host-event", envelope: readinessChanged(1, "ready") });
+    expect(staleOldStreamReadiness).toBe(replacement);
+    expect(staleOldStreamReadiness.cursorBySessionId.s).toBe(0);
   });
 
   it("rejects protocol terminal output without changing state or advancing the cursor", () => {
@@ -147,7 +205,7 @@ describe("session runtime reducer", () => {
   it("applies snapshots and replays deterministically without mutating inputs", () => {
     const initial = createSessionRuntimeState([session()]);
     const actions = [
-      { type: "host-snapshot", snapshot: { protocolVersion: 3, sessionId: "s", streamId: "stream-1", lastSequence: 4, transport: { type: "protocol", lifecycleEvidence: "structured", source: handshakeSource } } },
+      { type: "host-snapshot", snapshot: { protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId: "s", streamId: "stream-1", lastSequence: 4, transport: { type: "protocol", lifecycleEvidence: "structured", source: handshakeSource }, promptReadiness: "ready" } },
       { type: "host-event", envelope: activity(5, { type: "turn-started", evidence: "structured" }) },
     ] as const;
     const replay = () => actions.reduce(reduceSessionRuntime, initial);
@@ -159,11 +217,11 @@ describe("session runtime reducer", () => {
     let state = reduceSessionRuntime(createSessionRuntimeState([session()]), { type: "host-event", envelope: fallbackOpened() });
     state = reduceSessionRuntime(state, { type: "host-event", envelope: envelope(4, { type: "terminal-output", data: "new" }) });
     const current = state;
-    state = reduceSessionRuntime(state, { type: "host-snapshot", snapshot: { protocolVersion: 3, sessionId: "s", streamId: "stream-1", lastSequence: 2, transport: { type: "pty", lifecycleEvidence: "fallback" } } });
+    state = reduceSessionRuntime(state, { type: "host-snapshot", snapshot: { protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId: "s", streamId: "stream-1", lastSequence: 2, transport: { type: "pty", lifecycleEvidence: "fallback" }, promptReadiness: "pty-fallback-sendable" } });
     expect(state).toBe(current);
     state = reduceSessionRuntime(state, { type: "host-event", envelope: envelope(5, { type: "closed", outcome: { type: "exited", success: true } }) });
     const closed = state;
-    state = reduceSessionRuntime(state, { type: "host-snapshot", snapshot: { protocolVersion: 3, sessionId: "s", streamId: "stream-1", lastSequence: 5, transport: { type: "pty", lifecycleEvidence: "fallback" } } });
+    state = reduceSessionRuntime(state, { type: "host-snapshot", snapshot: { protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId: "s", streamId: "stream-1", lastSequence: 5, transport: { type: "pty", lifecycleEvidence: "fallback" }, promptReadiness: "pty-fallback-sendable" } });
     expect(state).toBe(closed);
   });
 
@@ -186,7 +244,8 @@ describe("session runtime reducer", () => {
     expect(reduceSessionRuntime(initial, { type: "host-event", envelope: structuredOpened("stream-1", { ...handshakeSource, agentId: "pi", integration: "rpc" }) })).toBe(initial);
     expect(reduceSessionRuntime(initial, { type: "host-event", envelope: structuredOpened("stream-1", { ...handshakeSource, providerSessionId: "other-thread" }) })).toBe(initial);
     expect(reduceSessionRuntime(initial, { type: "host-event", envelope: structuredOpened("stream-1", { ...handshakeSource, integration: "hooks" }) })).toBe(initial);
-    expect(reduceSessionRuntime(initial, { type: "host-event", envelope: envelope(0, { type: "opened", transport: { type: "pty", lifecycleEvidence: "structured", source: handshakeSource } }) })).toBe(initial);
+    expect(reduceSessionRuntime(initial, { type: "host-event", envelope: envelope(0, { type: "opened", transport: { type: "pty", lifecycleEvidence: "structured", source: handshakeSource }, promptReadiness: "awaiting-authoritative" }) })).toBe(initial);
+    expect(reduceSessionRuntime(initial, { type: "host-event", envelope: envelope(0, { type: "opened", transport: { type: "protocol", lifecycleEvidence: "structured", source: handshakeSource }, promptReadiness: "ready" }) })).toBe(initial);
 
     const claudeState = reduceSessionRuntime(createSessionRuntimeState([session({ agentId: "claude-code" })]), { type: "host-event", envelope: claudePtyOpened() });
     expect(claudeState.connectionBySessionId.s.transport.type).toBe("pty");

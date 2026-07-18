@@ -2,6 +2,7 @@ import type { ActivityEvent, LiveTurnLifecycle, TerminalOutcome } from "./lifecy
 import type { AgentSession } from "./models";
 import type {
   HostedSessionSnapshot,
+  PromptReadinessState,
   SessionEventEnvelope,
   SessionTransportDescriptor,
   StructuredLifecycleIntegration,
@@ -17,7 +18,6 @@ import {
 } from "./sessionLifecycle";
 import {
   initialPromptReadinessForTransport,
-  type PromptReadinessState,
 } from "./sessionPrompt";
 import { reduceSessionStatus } from "./status";
 
@@ -108,6 +108,7 @@ export function reduceSessionRuntime(state: SessionRuntimeState, action: Session
         const cursor = state.cursorBySessionId[snapshot.sessionId] ?? -1;
         if (!connection.open || snapshot.lastSequence < cursor) return state;
       }
+      if (!promptReadinessMatchesTransport(snapshot.transport, snapshot.promptReadiness)) return state;
       const acceptedSession = acceptOpenedSession(session, snapshot.transport);
       if (!acceptedSession || !connectionSourceCanRemain(connection, snapshot.streamId, snapshot.transport)) return state;
       const connectedSession = acceptedSession.connected && acceptedSession.running
@@ -122,9 +123,7 @@ export function reduceSessionRuntime(state: SessionRuntimeState, action: Session
             streamId: snapshot.streamId,
             transport: snapshot.transport,
             open: true,
-            promptReadiness: connection?.streamId === snapshot.streamId
-              ? connection.promptReadiness
-              : initialPromptReadinessForTransport(snapshot.transport),
+            promptReadiness: snapshot.promptReadiness,
             source: transportSource(snapshot.transport),
             currentTurn: connection?.streamId === snapshot.streamId ? connection.currentTurn : undefined,
             pendingAttentionKeys: connection?.streamId === snapshot.streamId ? connection.pendingAttentionKeys : undefined,
@@ -156,6 +155,7 @@ function reduceHostEvent(state: SessionRuntimeState, envelope: SessionEventEnvel
   }
 
   if (envelope.event.type === "opened") {
+    if (envelope.event.promptReadiness !== initialPromptReadinessForTransport(envelope.event.transport)) return state;
     const acceptedSession = acceptOpenedSession(session, envelope.event.transport);
     if (!acceptedSession) return state;
     const openedSession = acceptedSession.connected && acceptedSession.running
@@ -170,7 +170,7 @@ function reduceHostEvent(state: SessionRuntimeState, envelope: SessionEventEnvel
           streamId: envelope.streamId,
           transport: envelope.event.transport,
           open: true,
-          promptReadiness: initialPromptReadinessForTransport(envelope.event.transport),
+          promptReadiness: envelope.event.promptReadiness,
           source: transportSource(envelope.event.transport),
         },
       },
@@ -183,6 +183,10 @@ function reduceHostEvent(state: SessionRuntimeState, envelope: SessionEventEnvel
   let acceptedConnection: SessionConnectionSnapshot = connection;
   if (envelope.event.type === "activity") {
     const nextConnection = acceptHostActivity(connection, envelope.event);
+    if (!nextConnection) return state;
+    acceptedConnection = nextConnection;
+  } else if (envelope.event.type === "prompt-readiness-changed") {
+    const nextConnection = acceptPromptReadinessChange(connection, envelope.event);
     if (!nextConnection) return state;
     acceptedConnection = nextConnection;
   }
@@ -284,6 +288,24 @@ function acceptHostActivity(
   }
 
   return undefined;
+}
+
+function acceptPromptReadinessChange(
+  connection: SessionConnectionSnapshot,
+  event: Extract<SessionEventEnvelope["event"], { type: "prompt-readiness-changed" }>,
+): SessionConnectionSnapshot | undefined {
+  if (!connection.source || !sourceIdentityMatches(connection.source, event.source)) return undefined;
+  if (!promptReadinessMatchesTransport(connection.transport, event.promptReadiness)) return undefined;
+  if (connection.promptReadiness === event.promptReadiness) return undefined;
+  return { ...connection, promptReadiness: event.promptReadiness };
+}
+
+function promptReadinessMatchesTransport(
+  transport: SessionTransportDescriptor,
+  readiness: PromptReadinessState,
+): boolean {
+  const fallback = transport.type === "pty" && transport.lifecycleEvidence === "fallback";
+  return fallback ? readiness === "pty-fallback-sendable" : readiness !== "pty-fallback-sendable";
 }
 
 function sourceIdentityMatches(a: StructuredLifecycleSource, b: StructuredLifecycleSource): boolean {

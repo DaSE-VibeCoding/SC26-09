@@ -462,6 +462,7 @@ mod tests {
             sequence: 0,
             transport_kind: BindingTransport::Protocol,
             source: None,
+            prompt_readiness: PromptReadiness::AwaitingAuthoritative,
             current_turn: None,
             pending_attention_keys: HashSet::new(),
             terminal_outcome: None,
