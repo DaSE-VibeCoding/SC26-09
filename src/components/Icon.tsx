@@ -10,6 +10,7 @@ export type IconName =
   | "files"
   | "git"
   | "folder"
+  | "folderOpen"
   | "file"
   | "chevron"
   | "stop"
@@ -33,6 +34,7 @@ const paths: Record<IconName, React.ReactNode> = {
   files: <><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h5"/></>,
   git: <><circle cx="7" cy="6" r="2"/><circle cx="17" cy="18" r="2"/><path d="M7 8v7a3 3 0 0 0 3 3h5"/><path d="M7 11h5a3 3 0 0 0 3-3V6"/><circle cx="15" cy="5" r="2"/></>,
   folder: <path d="M3 7h7l2-3h9v16H3z"/>,
+  folderOpen: <><path d="M3 8V6h7l2 2h9"/><path d="M3 9h19l-3 11H5z"/></>,
   file: <><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h5"/></>,
   chevron: <path d="m9 6 6 6-6 6"/>,
   stop: <rect x="6" y="6" width="12" height="12" rx="2"/>,

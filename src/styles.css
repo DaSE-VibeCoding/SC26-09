@@ -294,10 +294,18 @@ kbd { margin-left: auto; color: #82a1bd; background: #132c49; border: 1px solid 
 .file-tree, .changes-panel { height: calc(100vh - 58px); overflow: auto; scrollbar-width: thin; }
 .inspector-heading { padding: 15px 12px 9px; }
 .inspector-heading small, .settings-section-title small { color: #5f7a96; text-transform: none; letter-spacing: 0; font-weight: 520; }
-.file-row { height: 29px; display: flex; align-items: center; gap: 7px; padding-right: 10px; color: #9cb1c6; font-size: 10.5px; white-space: nowrap; }
-.file-row:hover { background: #112942; color: #e2ecf7; }
-.file-row svg { color: #6e8fac; flex: 0 0 auto; }
-.file-row span { overflow: hidden; text-overflow: ellipsis; }
+.workspace-file-tree { padding: 1px 7px 12px; }
+.workspace-tree-row { --tree-level: 1; position: relative; width: 100%; height: 27px; box-sizing: border-box; border: 0; border-radius: 5px; display: flex; align-items: center; gap: 5px; padding: 0 8px 0 calc(4px + (var(--tree-level) - 1) * 14px); background: transparent; color: #505050; font: inherit; font-size: 10.5px; text-align: left; white-space: nowrap; outline: none; }
+button.workspace-tree-row { cursor: pointer; }
+.workspace-tree-row:hover { background: #eeeeec; color: #171717; }
+.workspace-tree-row:focus-visible { background: #eeeeec; color: #171717; box-shadow: inset 0 0 0 1px #9a9a96; }
+.workspace-tree-row::before { content: ""; position: absolute; top: 0; bottom: 0; left: calc(17px + (var(--tree-level) - 2) * 14px); border-left: 1px solid #dfdfdc; opacity: 0; }
+.workspace-tree-row[aria-level]:not([aria-level="1"])::before { opacity: .7; }
+.tree-chevron { width: 12px; height: 12px; flex: 0 0 12px; display: grid; place-items: center; color: #858585; transition: transform 120ms ease; }
+.tree-chevron.is-open { transform: rotate(90deg); }
+.tree-entry-icon { flex: 0 0 auto; color: #777773; }
+.is-folder .tree-entry-icon { color: #a06b20; fill: #f4d9a4; stroke-width: 1.5; }
+.tree-entry-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .change-list { padding: 0 7px 9px; }
 .change-list button { width: 100%; min-height: 31px; border: 0; border-radius: 6px; background: transparent; color: #a9bed1; display: flex; align-items: center; gap: 7px; padding: 0 8px; font-size: 10.5px; cursor: pointer; text-align: left; }
 .change-list button:hover, .change-list button.is-active { background: #132d49; color: #edf5fc; }
@@ -447,9 +455,8 @@ kbd { color: #555555; background: #eeeeec; border-color: #d1d1cd; box-shadow: in
 .inspector-refresh { color: #737373; }
 .inspector-refresh:hover { background: #eeeeec; color: #222222; }
 .inspector-heading small, .settings-section-title small { color: #858585; }
-.file-row, .change-list button { color: #505050; }
-.file-row:hover, .change-list button:hover, .change-list button.is-active { background: #eeeeec; color: #171717; }
-.file-row svg { color: #737373; }
+.change-list button { color: #505050; }
+.change-list button:hover, .change-list button.is-active { background: #eeeeec; color: #171717; }
 .change-code, .change-m { color: #9b6200; }
 .change-a, .change-new { color: #18734d; }
 .change-d { color: #b93a3a; }

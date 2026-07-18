@@ -8,6 +8,7 @@ import { PelicanLogo } from "./components/PelicanLogo";
 import { PromptComposer } from "./components/PromptComposer";
 import { StatusDot } from "./components/StatusDot";
 import { TerminalView } from "./components/TerminalView";
+import { WorkspaceFileTree } from "./components/WorkspaceFileTree";
 import type {
   AgentInstallation,
   AgentSession,
@@ -1380,12 +1381,7 @@ export default function App() {
           <div className="file-tree">
             <div className="inspector-heading"><span>Workspace</span><small>{files.length} entries</small></div>
             {contextErrors.files && <p className="inspector-error" title={contextErrors.files}>Workspace files unavailable. Refresh to try again.</p>}
-            {files.map((entry) => (
-              <div className="file-row" key={entry.relativePath} style={{ paddingLeft: 14 + entry.depth * 14 }} title={entry.relativePath}>
-                <Icon name={entry.isDirectory ? "folder" : "file"} size={14} />
-                <span>{entry.name}</span>
-              </div>
-            ))}
+            {activeWorkspace && files.length > 0 && <WorkspaceFileTree key={activeWorkspace.id} entries={files} />}
             {activeWorkspace && files.length === 0 && !contextErrors.files && <p className="inspector-empty">{contextLoading ? "Loading workspace…" : "No files to show."}</p>}
           </div>
         ) : (
