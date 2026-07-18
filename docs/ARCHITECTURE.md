@@ -56,6 +56,18 @@ Prompt availability is fail-closed at a pure domain seam. Missing, closed, or tr
 
 The daemon milestone will add a versioned local-socket protocol and replayable terminal buffers. The desktop app will become a disposable client that can detach and reattach without affecting agents.
 
+## Saved-session navigation and cross-agent handoff
+
+The active workspace has a provider-neutral saved-session browser over the existing discovery inventory. It includes only disconnected, stopped rows with an exact observed resume handle, sorts them by recency, and resumes through the existing provider adapter. Browsing never reconstructs a handle from a provider ID and never treats an externally running foreground session as resumable.
+
+Cross-agent handoff is an explicit, local-only export. The Rust boundary resolves one to three exact saved-session identities and normalizes only visible user/assistant text from supported provider history surfaces: Codex `thread/read`, Claude Code transcript JSONL, and Pi session JSONL. Tool payloads/results, hidden reasoning, provider configuration, terminal buffers, attachments, and raw provider records are excluded. Reads and output are bounded; provider/session/workspace identity must match; generated Markdown is labeled untrusted inherited context and remains ephemeral in React. After user review, Pelican starts a fresh different provider session and places the Markdown in that session's draft. It never passes the briefing in process arguments or auto-sends it before the user submits.
+
+## Workspace inspector rendering
+
+The file tree starts with every represented directory collapsed, so its first view contains only top-level files and directories. Expansion remains keyboard accessible and uses Amp-compatible Lucide outline folder/FileCode geometry.
+
+Git patches remain path-safe, timeout-bounded, and capped by the Rust bridge. The frontend lazy-loads the Apache-2.0 `@pierre/diffs` renderer only when a selected change needs rich hunks. Parsing, Shiki highlighting, binary/empty/truncation fallbacks, and rendering stay local in the Tauri webview; no diff content is sent to diffs.com or another service.
+
 ## Pure live-turn lifecycle contract
 
 `src/domain/lifecycle.ts` owns the provider-neutral live-turn reducer contract. It is a pure model for LC-00, and `src/domain/sessionRuntime.ts` now wires accepted local fallback and normalized host activity into that reducer at a pure seam. Provider adapters and future protocol decoders still own conversion from provider-specific events into normalized `ActivityEvent` values; no production structured provider producer is wired yet.

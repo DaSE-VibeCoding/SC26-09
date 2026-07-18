@@ -25,6 +25,8 @@ A sanitized native smoke with Codex 0.144.5 confirmed that app-server omits top-
 
 CX-01B fixture-verifies an always-compiled but unregistered supervisor that directly owns one configured app-server child, bounds stdout JSONL, continuously discards stderr, correlates the canonical new-thread handshake, commits exact source plus `ready` atomically, and reaps gracefully or forcibly. A sanitized native supervisor smoke passed against Codex 0.144.5 without sending a prompt or recording provider data. CX-01C fixture-verifies that accepted protocol transports remain Prompt-only and never initialize or advertise Terminal, while PTY bindings preserve existing behavior. The current private supervisor still combines one route with one process; production work must first introduce process-global request routing for the target one-process-per-`CODEX_HOME` topology.
 
+The cross-agent handoff exporter separately uses bounded `thread/read` with `includeTurns: true` for an exact discovered thread ID. It accepts only text entries from `userMessage` and `agentMessage`, verifies `result.thread.id` and canonical `cwd`, and never registers that short-lived read path as a production session binding.
+
 Primary sources: [app-server protocol](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md), [CLI reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli), and [non-interactive JSONL](https://learn.chatgpt.com/docs/non-interactive-mode).
 
 ## Claude Code
@@ -37,6 +39,8 @@ State mapping: permission, elicitation, or user question → attention; prompt/t
 
 Primary sources: [CLI reference](https://code.claude.com/docs/en/cli-reference), [hooks](https://code.claude.com/docs/en/hooks), [sessions](https://code.claude.com/docs/en/sessions), and [agent view](https://code.claude.com/docs/en/agent-view).
 
+For an explicit handoff export, Pelican scans the configured workspace transcript directory for the exact embedded session ID and canonical workspace. Only `user`/`assistant` message text is normalized; tool, thinking, hook, system, and unknown blocks are omitted. Transcript content is never used as lifecycle authority.
+
 ## Pi
 
 Preferred transport: `pi --mode rpc --name <title>`, one process per Pelican session. Pelican sends newline-delimited JSON commands and consumes structured events. Resume uses the stored absolute session JSONL path with `--session`.
@@ -48,5 +52,7 @@ A sanitized native smoke with Pi 0.80.10 confirmed typed response correlation, `
 State mapping target: unresolved extension UI request → attention; an active serialized prompt epoch, compaction, or retry → working; final `agent_settled` reason → done, attention, or idle; reviewed successful settlement → idle; process exit → offline. `agent_end` is not completion.
 
 PTY compatibility mode remains available for users who want Pi's native TUI, with lower-confidence state detection.
+
+For an explicit handoff export, the exact absolute resume path must canonicalize beneath Pi's configured session directory and its versioned header must match both session ID and workspace. Only documented `message` rows with `user` or `assistant` roles and explicit text are normalized.
 
 Primary sources: [Pi repository](https://github.com/earendil-works/pi), [RPC protocol](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md), and [session format](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md).
