@@ -1,13 +1,14 @@
 import type { ActivityEvent, LiveTurnLifecycle, TerminalOutcome } from "./lifecycle";
-import type { AgentSession } from "./models";
-import type {
-  HostedSessionSnapshot,
-  PromptReadinessState,
-  SessionEventEnvelope,
-  SessionTransportDescriptor,
-  StructuredLifecycleIntegration,
-  StructuredLifecycleSource,
-  StructuredTurnIdentity,
+import type { AgentSession, SessionMode } from "./models";
+import {
+  hasInteractiveTerminal,
+  type HostedSessionSnapshot,
+  type PromptReadinessState,
+  type SessionEventEnvelope,
+  type SessionTransportDescriptor,
+  type StructuredLifecycleIntegration,
+  type StructuredLifecycleSource,
+  type StructuredTurnIdentity,
 } from "./sessionHost";
 import {
   applySessionActivityEvents,
@@ -20,6 +21,47 @@ import {
   initialPromptReadinessForTransport,
 } from "./sessionPrompt";
 import { reduceSessionStatus } from "./status";
+
+export type SessionTerminalAvailability = "interactive" | "recovery" | "unavailable";
+
+export interface SessionSurfaceState {
+  readonly effectiveMode: SessionMode;
+  readonly terminalAvailability: SessionTerminalAvailability;
+  readonly canMountTerminalView: boolean;
+}
+
+export function selectSessionSurfaceState(
+  session: AgentSession | null | undefined,
+  connection: SessionConnectionSnapshot | undefined,
+  requestedMode: SessionMode,
+): SessionSurfaceState {
+  if (!session) return promptOnlySurface();
+
+  if (session.connected) {
+    if (!connection?.open) return promptOnlySurface();
+    if (!hasInteractiveTerminal(connection.transport)) return promptOnlySurface();
+    return {
+      effectiveMode: requestedMode,
+      terminalAvailability: "interactive",
+      canMountTerminalView: true,
+    };
+  }
+
+  if (connection && !hasInteractiveTerminal(connection.transport)) return promptOnlySurface();
+  return {
+    effectiveMode: requestedMode,
+    terminalAvailability: "recovery",
+    canMountTerminalView: false,
+  };
+}
+
+function promptOnlySurface(): SessionSurfaceState {
+  return {
+    effectiveMode: "prompt",
+    terminalAvailability: "unavailable",
+    canMountTerminalView: false,
+  };
+}
 
 export interface SessionConnectionSnapshot {
   readonly streamId: string;

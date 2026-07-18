@@ -94,7 +94,7 @@ describe("prompt availability policy", () => {
     expect(pty.authority).toBe("provider-ready");
   });
 
-  it.each(["awaiting-authoritative", "auth-required", "setup-required", "unsupported"] as const)(
+  it.each(["awaiting-authoritative", "unsupported"] as const)(
     "blocks structured %s readiness with exact recovery copy",
     (readiness) => {
       const availability = selectPromptAvailability(session(), protocolConnection(readiness));
@@ -105,6 +105,28 @@ describe("prompt availability policy", () => {
       expect(buildPromptSendRequests(session(), protocolConnection(readiness), "hello")).toEqual([]);
     },
   );
+
+  it.each([
+    [
+      "auth-required",
+      "Authentication is required. Authenticate in the provider CLI, then reconnect. Your draft is preserved.",
+    ],
+    [
+      "setup-required",
+      "Provider setup is required. Finish setup in the provider CLI, then reconnect. Your draft is preserved.",
+    ],
+  ] as const)("uses transport-aware %s readiness copy", (readiness, protocolMessage) => {
+    const protocol = selectPromptAvailability(session(), protocolConnection(readiness));
+    expect(protocol.canSend).toBe(false);
+    expect(protocol.message).toBe(protocolMessage);
+    expect(protocol.message).not.toContain("Terminal");
+    expect(buildPromptSendRequests(session(), protocolConnection(readiness), "hello")).toEqual([]);
+
+    const pty = selectPromptAvailability(session({ agentId: "claude-code" }), structuredPtyConnection(readiness));
+    expect(pty.canSend).toBe(false);
+    expect(pty.message).toBe(PROMPT_READINESS_COPY[readiness]);
+    expect(pty.message).toContain("Terminal");
+  });
 
   it("fails closed on missing, closed, and mismatched transport readiness", () => {
     expect(selectPromptAvailability(session(), undefined).canSend).toBe(false);

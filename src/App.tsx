@@ -26,6 +26,7 @@ import {
 import {
   createSessionRuntimeState,
   reduceSessionRuntime,
+  selectSessionSurfaceState,
   type SessionRuntimeState,
 } from "./domain/sessionRuntime";
 import {
@@ -47,7 +48,7 @@ import {
   sendSession,
   stopSession as stopHostedSession,
 } from "./services/native";
-import { SESSION_HOST_PROTOCOL_VERSION, type SessionOpenRequest } from "./domain/sessionHost";
+import { hasInteractiveTerminal, SESSION_HOST_PROTOCOL_VERSION, type SessionOpenRequest } from "./domain/sessionHost";
 import {
   loadSessions,
   loadWorkspaces,
@@ -278,6 +279,9 @@ export default function App() {
   const activeSessionStopping = activeSession ? stoppingSessionIds.has(activeSession.id) : false;
   const activeSessionSending = activeSession ? sendingSessionIds.has(activeSession.id) : false;
   const activeSessionConnection = activeSession ? connectionFor(activeSession.id) : undefined;
+  const activeSessionSurface = selectSessionSurfaceState(activeSession, activeSessionConnection, mode);
+  const effectiveMode = activeSessionSurface.effectiveMode;
+  const terminalModeAvailable = activeSessionSurface.terminalAvailability !== "unavailable";
   const activePromptAvailability = selectPromptAvailability(activeSession, activeSessionConnection);
   const activeSessionCanAttach = Boolean(
     activeSession && !activeSession.connected && activeSession.running && activeSession.attachHandle,
@@ -296,6 +300,10 @@ export default function App() {
     if (!activeSessionId) return;
     setDrafts((current) => ({ ...current, [activeSessionId]: value }));
   }, [activeSessionId]);
+
+  useEffect(() => {
+    if (mode !== effectiveMode) setMode(effectiveMode);
+  }, [effectiveMode, mode]);
 
   const updateRuntimeSession = (
     state: SessionRuntimeState,
@@ -335,10 +343,10 @@ export default function App() {
   }, [activeSessionId]);
 
   useEffect(() => {
-    if (mode === "prompt" && activeSessionId) {
+    if (effectiveMode === "prompt" && activeSessionId) {
       queueMicrotask(() => promptRef.current?.focus());
     }
-  }, [activeSessionId, mode]);
+  }, [activeSessionId, effectiveMode]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -409,7 +417,9 @@ export default function App() {
       const liveIds = hosted.map((snapshot) => snapshot.sessionId);
       const now = new Date().toISOString();
       const allocatedSessionIds = discovered.map(() => createId());
-      liveIds.forEach((sessionId) => initializeTerminalBuffer(sessionId));
+      hosted
+        .filter((snapshot) => hasInteractiveTerminal(snapshot.transport))
+        .forEach((snapshot) => initializeTerminalBuffer(snapshot.sessionId));
       setSessionRuntime((current) => {
         let allocatedSessionIdIndex = 0;
         const nextDiscoveredSessionId = () => {
@@ -842,7 +852,7 @@ export default function App() {
           .then((hosted) => hosted.find((candidate) => candidate.sessionId === target.id))
           .catch(() => undefined);
         if (snapshot) {
-          initializeTerminalBuffer(target.id);
+          if (hasInteractiveTerminal(snapshot.transport)) initializeTerminalBuffer(target.id);
           setSessionRuntime((current) => reduceSessionRuntime(
             updateRuntimeSession(current, target.id, (session) => ({ ...session, unread: false })),
             { type: "host-snapshot", snapshot },
@@ -1038,15 +1048,22 @@ export default function App() {
 
   const hasActiveWorkspace = activeWorkspace !== null;
   const hasActiveSession = activeSession !== null;
-  const actions = useMemo<PaletteAction[]>(() => [
-    { id: "add-workspace", icon: "folder", label: "Add workspace", detail: "Open a local project", shortcut: "⇧⌘O", run: () => { void addWorkspace(); } },
-    { id: "new-session", icon: "plus", label: "New agent session", detail: hasActiveWorkspace ? "Codex, Claude Code, or Pi" : "Add a workspace first", shortcut: "⇧⌘N", disabled: !hasActiveWorkspace, run: openAgentPicker },
-    { id: "refresh-sessions", icon: "refresh", label: "Refresh agent sessions", detail: "Discover saved and running CLI sessions", disabled: !hasActiveWorkspace || sessionsRefreshing, run: () => { void refreshDiscoveredSessions(true); } },
-    { id: "toggle-mode", icon: "terminal", label: `Switch to ${mode === "prompt" ? "terminal" : "prompt"}`, shortcut: "⌃`", disabled: !hasActiveSession, run: () => setMode((current) => current === "prompt" ? "terminal" : "prompt") },
-    { id: "show-changes", icon: "git", label: "Show Git changes", shortcut: "⇧⌘G", run: () => setInspectorTab("changes") },
-    { id: "show-files", icon: "files", label: "Show workspace files", shortcut: "⇧⌘E", run: () => setInspectorTab("files") },
-    { id: "settings", icon: "settings", label: "Open settings", detail: "Agents and keyboard shortcuts", shortcut: "⌘,", run: () => setSettingsOpen(true) },
-  ], [addWorkspace, hasActiveSession, hasActiveWorkspace, mode, openAgentPicker, refreshDiscoveredSessions, sessionsRefreshing]);
+  const actions = useMemo<PaletteAction[]>(() => {
+    const next: PaletteAction[] = [
+      { id: "add-workspace", icon: "folder", label: "Add workspace", detail: "Open a local project", shortcut: "⇧⌘O", run: () => { void addWorkspace(); } },
+      { id: "new-session", icon: "plus", label: "New agent session", detail: hasActiveWorkspace ? "Codex, Claude Code, or Pi" : "Add a workspace first", shortcut: "⇧⌘N", disabled: !hasActiveWorkspace, run: openAgentPicker },
+      { id: "refresh-sessions", icon: "refresh", label: "Refresh agent sessions", detail: "Discover saved and running CLI sessions", disabled: !hasActiveWorkspace || sessionsRefreshing, run: () => { void refreshDiscoveredSessions(true); } },
+    ];
+    if (hasActiveSession && terminalModeAvailable) {
+      next.push({ id: "toggle-mode", icon: "terminal", label: `Switch to ${effectiveMode === "prompt" ? "terminal" : "prompt"}`, shortcut: "⌃`", run: () => setMode((current) => current === "prompt" ? "terminal" : "prompt") });
+    }
+    next.push(
+      { id: "show-changes", icon: "git", label: "Show Git changes", shortcut: "⇧⌘G", run: () => setInspectorTab("changes") },
+      { id: "show-files", icon: "files", label: "Show workspace files", shortcut: "⇧⌘E", run: () => setInspectorTab("files") },
+      { id: "settings", icon: "settings", label: "Open settings", detail: "Agents and keyboard shortcuts", shortcut: "⌘,", run: () => setSettingsOpen(true) },
+    );
+    return next;
+  }, [addWorkspace, effectiveMode, hasActiveSession, hasActiveWorkspace, openAgentPicker, refreshDiscoveredSessions, sessionsRefreshing, terminalModeAvailable]);
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
@@ -1081,6 +1098,7 @@ export default function App() {
         claimShortcut();
         setSettingsOpen(true);
       } else if (event.ctrlKey && event.key === "`") {
+        if (!terminalModeAvailable) return;
         claimShortcut();
         setMode((current) => current === "prompt" ? "terminal" : "prompt");
       } else if (event.metaKey && /^[1-9]$/.test(event.key)) {
@@ -1093,7 +1111,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handleKey, true);
     return () => window.removeEventListener("keydown", handleKey, true);
-  }, [addWorkspace, openAgentPicker, overlayOpen, selectSession]);
+  }, [addWorkspace, openAgentPicker, overlayOpen, selectSession, terminalModeAvailable]);
 
   return (
     <main className={`app-shell${isTauri() ? "" : " has-preview-banner"}`}>
@@ -1223,37 +1241,39 @@ export default function App() {
           <div className="empty-state">
             <span className="eyebrow">{activeWorkspace.name}</span>
             <h1>Start an agent session.</h1>
-            <p>Every session gets a real terminal and a shared lifecycle, regardless of agent.</p>
+            <p>Every session gets one Pelican-owned binding and a shared lifecycle, regardless of agent.</p>
             <button type="button" className="primary-button" onClick={openAgentPicker}>
               <Icon name="plus" size={16} /> New session
             </button>
           </div>
         ) : (
           <div className="session-surface">
-            <div className="session-toolbar">
-              <div className="mode-switch" role="group" aria-label="Session input mode">
-                <button type="button" aria-pressed={mode === "prompt"} className={mode === "prompt" ? "is-active" : ""} onClick={() => setMode("prompt")}>
-                  <Icon name="message" size={14} /> Prompt
-                </button>
-                <button type="button" aria-pressed={mode === "terminal"} className={mode === "terminal" ? "is-active" : ""} onClick={() => setMode("terminal")}>
-                  <Icon name="terminal" size={14} /> Terminal
-                </button>
+            {terminalModeAvailable && (
+              <div className="session-toolbar">
+                <div className="mode-switch" role="group" aria-label="Session input mode">
+                  <button type="button" aria-pressed={effectiveMode === "prompt"} className={effectiveMode === "prompt" ? "is-active" : ""} onClick={() => setMode("prompt")}>
+                    <Icon name="message" size={14} /> Prompt
+                  </button>
+                  <button type="button" aria-pressed={effectiveMode === "terminal"} className={effectiveMode === "terminal" ? "is-active" : ""} onClick={() => setMode("terminal")}>
+                    <Icon name="terminal" size={14} /> Terminal
+                  </button>
+                </div>
+                <span className="mode-hint">⌃` to switch</span>
               </div>
-              <span className="mode-hint">⌃` to switch</span>
-            </div>
+            )}
 
             <div className="terminal-frame">
-              {activeSession.connected && (
+              {activeSessionSurface.canMountTerminalView && activeSessionConnection && (
                 <TerminalView
                   sessionId={activeSession.id}
-                  streamId={connectionFor(activeSession.id)?.streamId ?? ""}
-                  visible={mode === "terminal"}
-                  interactive={mode === "terminal" && !activeSessionStarting && !activeSessionStopping}
+                  streamId={activeSessionConnection.streamId}
+                  visible={effectiveMode === "terminal"}
+                  interactive={effectiveMode === "terminal" && !activeSessionStarting && !activeSessionStopping}
                   onInput={handleTerminalInput}
                   onError={(message) => setError(`Terminal input failed: ${message}`)}
                 />
               )}
-              {mode === "terminal" && !activeSession.connected && (
+              {effectiveMode === "terminal" && activeSessionSurface.terminalAvailability === "recovery" && (
                 <div className="terminal-unavailable">
                   {activeSessionStarting ? (
                     <>
@@ -1286,7 +1306,7 @@ export default function App() {
                   )}
                 </div>
               )}
-              {mode === "prompt" && (
+              {effectiveMode === "prompt" && (
                 <div className="prompt-view">
                   <div className="session-identity">
                     <AgentLogo agentId={activeSession.agentId} size={44} />
@@ -1308,7 +1328,9 @@ export default function App() {
                             ? "No interactive terminal is connected for this session."
                         : activeSession.status === "attention"
                           ? "The agent is waiting for your response."
-                          : "The full terminal stays active behind this focused command surface."}</p>
+                          : activeSessionSurface.terminalAvailability === "interactive"
+                            ? "The full terminal stays active behind this focused command surface."
+                            : "This binding exposes Prompt without an interactive terminal."}</p>
                   </div>
                   {activeSessionStarting ? (
                     <div className="session-recovery is-launching">
@@ -1417,7 +1439,7 @@ export default function App() {
             <button type="button" className="icon-button dialog-close" data-dialog-initial-focus onClick={() => setAgentPickerOpen(false)} aria-label="Close agent picker"><Icon name="close" size={16} /></button>
             <span className="eyebrow">New session</span>
             <h2 id="agent-picker-title">Choose an agent</h2>
-            <p>Each first-class agent uses the same terminal and session lifecycle.</p>
+            <p>Each first-class agent uses one Pelican-owned binding and the same session lifecycle.</p>
             <div className="agent-options">
               {agentRegistry.map((adapter) => {
                 const installation = installations.find((candidate) => candidate.agentId === adapter.id);
