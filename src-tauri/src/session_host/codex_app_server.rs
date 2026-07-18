@@ -113,10 +113,9 @@ impl Decoder {
                 ))
             }
             (Direction::Server, "turn/started") => {
-                let (thread_id, turn_id) = lifecycle_identity(object)?;
+                let (thread_id, turn_id, status) = lifecycle_identity(object)?;
                 require_bound_thread(self, thread_id)?;
-                let params = required_params(object)?;
-                if params.get("status").and_then(Value::as_str) != Some("inProgress") {
+                if status != "inProgress" {
                     return Err("Codex turn/started status is invalid".into());
                 }
                 let envelope = accept_structured_activity(
@@ -192,12 +191,8 @@ impl Decoder {
                 Ok(DecodeOutput::Activity(envelope))
             }
             (Direction::Server, "turn/completed") => {
-                let (thread_id, turn_id) = lifecycle_identity(object)?;
+                let (thread_id, turn_id, status) = lifecycle_identity(object)?;
                 require_bound_thread(self, thread_id)?;
-                let status = required_params(object)?
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .ok_or("Missing Codex completion status")?;
                 let outcome = match status {
                     "completed" => TerminalOutcome::Completed,
                     "failed" => TerminalOutcome::Failed,
@@ -320,14 +315,18 @@ fn approval_key(id: &RequestId) -> Result<String, String> {
     validate_activity_key(&key, "Attention key")?;
     Ok(key)
 }
-fn lifecycle_identity(object: &Map<String, Value>) -> Result<(&str, &str), String> {
+fn lifecycle_identity(object: &Map<String, Value>) -> Result<(&str, &str, &str), String> {
     let params = required_params(object)?;
     let thread_id = required_string(params, "threadId")?;
     let turn = params
         .get("turn")
         .and_then(Value::as_object)
         .ok_or("Missing Codex turn")?;
-    Ok((thread_id, required_string(turn, "id")?))
+    Ok((
+        thread_id,
+        required_string(turn, "id")?,
+        required_string(turn, "status")?,
+    ))
 }
 fn require_bound_thread(decoder: &Decoder, thread_id: &str) -> Result<(), String> {
     match decoder.thread_id.as_deref() {
@@ -401,7 +400,7 @@ mod tests {
         }
     }
     fn started() -> Value {
-        json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"},"status":"inProgress"}})
+        json!({"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"inProgress"}}})
     }
     fn approval(method: &str, id: Value) -> Value {
         json!({"method":method,"id":id,"params":{"threadId":"thread-1","turnId":"turn-1","itemId":"item-1"}})
@@ -410,7 +409,7 @@ mod tests {
         json!({"method":"serverRequest/resolved","params":{"threadId":"thread-1","requestId":id}})
     }
     fn completed(status: &str) -> Value {
-        json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1"},"status":status}})
+        json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":status}}})
     }
 
     #[test]
@@ -616,8 +615,9 @@ mod tests {
         let before = s.sequence;
         for msg in [
             started(),
-            json!({"method":"turn/started","params":{"threadId":"wrong","turn":{"id":"x"},"status":"inProgress"}}),
-            json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"stale"},"status":"completed"}}),
+            json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1"},"status":"completed"}}),
+            json!({"method":"turn/started","params":{"threadId":"wrong","turn":{"id":"x","status":"inProgress"}}}),
+            json!({"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"stale","status":"completed"}}}),
             approval("item/fileChange/requestApproval", json!(1)),
         ] {
             let result = d.decode(Direction::Server, msg.clone(), "s", &mut s);
