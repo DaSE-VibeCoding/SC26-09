@@ -21,6 +21,8 @@ codex resume -C <workspace> <session-id> --no-alt-screen
 
 State mapping: outstanding server request → attention; active thread or turn → working; completed turn → done/unread; reviewed idle thread → idle; transport exit → offline.
 
+A sanitized native smoke with Codex 0.144.5 confirmed that app-server omits top-level `jsonrpc`, preserves integer and string request IDs, returns provider identity at `result.thread.id`, and emits lifecycle status at `params.turn.status`. Closing stdin after terminal completion exited cleanly. This validates the private decoder's wire shape only; Pelican does not yet own a production app-server binding.
+
 Primary sources: [app-server protocol](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md), [CLI reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli), and [non-interactive JSONL](https://learn.chatgpt.com/docs/non-interactive-mode).
 
 ## Claude Code
@@ -38,6 +40,8 @@ Primary sources: [CLI reference](https://code.claude.com/docs/en/cli-reference),
 Preferred transport: `pi --mode rpc --name <title>`, one process per Pelican session. Pelican sends newline-delimited JSON commands and consumes structured events. Resume uses the stored absolute session JSONL path with `--session`.
 
 PI-01A fixture-verifies a private decoder only: correlated `get_state` plus the version-3 session header binds the exact provider session and absolute resume path; an accepted ordinary prompt's typed request ID owns one serialized lifecycle epoch. `agent_start` begins that epoch, each `turn_end` updates the candidate outcome across tool use or retry, and only `agent_settled` emits completed, failed, or interrupted. Untimed extension UI dialogs use exact request/response IDs for sticky attention. Timed dialogs, queued/concurrent/steering prompts, process ownership, prompt writes, readiness, and production RPC support remain excluded.
+
+A sanitized native smoke with Pi 0.80.10 confirmed typed response correlation, `data.sessionId`, absolute `data.sessionFile`, prompt response before `agent_start`, `turn_end.message.stopReason`, non-terminal `agent_end`, terminal `agent_settled`, and clean EOF exit. For a new session, the announced file did not exist until after the first prompt, and the persisted header used a canonicalized macOS temporary `cwd`; a production binding must therefore defer header reads until materialization and compare canonical workspace paths.
 
 State mapping target: unresolved extension UI request → attention; an active serialized prompt epoch, compaction, or retry → working; final `agent_settled` reason → done, attention, or idle; reviewed successful settlement → idle; process exit → offline. `agent_end` is not completion.
 
