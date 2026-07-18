@@ -22,7 +22,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 | Unified view of all threads and sessions | Partial | Saved Codex, Claude Code, and Pi sessions can be discovered for added workspaces. Arbitrary foreground TUIs cannot generally be attached, stale results are not reconciled, and Codex listing is not paginated. |
 | Real-time idle/running/waiting/completed status | Missing at product level | Current PTY heuristics can show startup, activity, attention text, and process exit. Private Codex and Pi fixture decoders normalize success, failure, interruption, and correlated attention, but no production app-server/RPC binding emits those events; Claude hooks also remain absent, so normal completed turns can remain `Working`. |
 | Left sidebar organizes workspaces, agents, sessions | Partial | Workspaces and sessions have agent logos, status text, unread state, and shortcuts. There is no independent collapse, grouping/filtering, global attention inbox, rename, archive, or pinning. |
-| Right sidebar shows files and Git context | Substantially implemented | File list, modified files, staged/unstaged/untracked diffs, refresh, empty, and error states exist. Folder interaction, file open/search, non-Git labeling, and richer diff feedback remain. |
+| Right sidebar shows files and Git context | Substantially implemented | Files use a collapsible, keyboard-navigable read-only tree with distinct folder icons; modified files, staged/unstaged/untracked diffs, refresh, empty, and error states exist. File open/search, non-Git labeling, richer diff feedback, and browser assistive-technology smoke remain. |
 | Friendly command interface | Partial | The composer sends text to the connected PTY, preserves drafts, and has fixture-verified readiness gating/copy. It has no conversation transcript, tool progress, approvals, structured streaming, real readiness handshake producer, or turn-level interrupt. |
 | Integrated terminal and direct control | Implemented for Pelican-owned PTYs | The in-process SessionHost owns PTY spawn, stream-scoped input/resize/stop, ordered events, and bounded UI buffering. External Codex/Pi foreground terminals cannot be reattached at the OS PTY level. |
 | Native notifications | Partial | Permission UI and focus-aware attention/process-exit notifications exist. Normal task completion is not known reliably while an interactive CLI remains open. |
@@ -153,7 +153,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 - [ ] PARTIAL — Show file-scan depth/entry truncation instead of silently stopping.
 - [ ] PARTIAL — Give diff loading and diff failure their own visual state and retry.
 - [ ] PARTIAL — Label a non-Git workspace neutrally rather than “Working tree clean.”
-- [ ] MISSING — Expand/collapse, keyboard tree navigation, file open/reveal/copy path, and search.
+- [ ] PARTIAL — Expand/collapse and fixture-tested keyboard tree navigation exist; file open/reveal/copy path, search, and browser assistive-technology smoke remain.
 - [ ] MISSING — Rich hunks, binary-file state, and optional stage/unstage actions.
 
 ### Notifications
