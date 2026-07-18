@@ -10,6 +10,7 @@ import type {
   TerminalOutputEvent,
 } from "../domain/models";
 import type { HostedSessionSnapshot, SessionEventEnvelope, SessionOpenRequest, SessionResizeRequest, SessionSendRequest, SessionStopRequest } from "../domain/sessionHost";
+import type { SessionHandoffExportRequest, SessionHandoffExportResponse } from "../domain/sessionHandoff";
 import { decodeHostedSessionSnapshot, decodeSessionEventEnvelope } from "./sessionHostCodec";
 import type { AgentLaunchSpec } from "../agents/types";
 
@@ -57,6 +58,13 @@ export async function discoverAgentSessions(
 ): Promise<DiscoveredAgentSession[]> {
   if (!isTauri() || workspacePaths.length === 0) return [];
   return invoke<DiscoveredAgentSession[]>("discover_agent_sessions", { workspacePaths });
+}
+
+export async function exportSessionHandoff(
+  request: SessionHandoffExportRequest,
+): Promise<SessionHandoffExportResponse> {
+  requireTauri("Exporting saved agent context");
+  return invoke<SessionHandoffExportResponse>("export_session_handoff", { request });
 }
 
 export async function spawnTerminal(request: SpawnTerminalRequest): Promise<void> {

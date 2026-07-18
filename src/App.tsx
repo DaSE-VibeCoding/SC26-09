@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { agentRegistry, getAgentAdapter } from "./agents/registry";
 import type { FirstClassAgentId } from "./agents/types";
 import { AgentLogo } from "./components/AgentLogo";
@@ -6,6 +6,8 @@ import { CommandPalette, type PaletteAction } from "./components/CommandPalette"
 import { Icon } from "./components/Icon";
 import { PelicanLogo } from "./components/PelicanLogo";
 import { PromptComposer } from "./components/PromptComposer";
+import { SessionBrowser } from "./components/SessionBrowser";
+import { SessionHandoffDialog } from "./components/SessionHandoffDialog";
 import { StatusDot } from "./components/StatusDot";
 import { TerminalView } from "./components/TerminalView";
 import { WorkspaceFileTree } from "./components/WorkspaceFileTree";
@@ -38,6 +40,7 @@ import {
   chooseWorkspace,
   discoverAgentSessions,
   discoverAgents,
+  exportSessionHandoff,
   getGitChanges,
   getGitDiff,
   isTauri,
@@ -55,7 +58,12 @@ import {
   saveSessions,
   saveWorkspaces,
 } from "./services/storage";
-import { mergeDiscoveredSessions, selectDiscoveryTerminalCleanupIds } from "./services/sessionDiscovery";
+import {
+  mergeDiscoveredSessions,
+  selectDiscoveryTerminalCleanupIds,
+  selectResumableWorkspaceSessions,
+} from "./services/sessionDiscovery";
+import { selectHandoffSourceSessions } from "./domain/sessionHandoff";
 import {
   enableNotifications,
   notificationsAreEnabled,
@@ -67,6 +75,11 @@ import {
   clearTerminalBuffer,
   initializeTerminalBuffer,
 } from "./services/terminalBuffer";
+
+const DiffViewer = lazy(async () => {
+  const module = await import("./components/DiffViewer");
+  return { default: module.DiffViewer };
+});
 
 function basename(path: string): string {
   return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
@@ -152,6 +165,11 @@ interface DiscoveryCleanupPlan {
   readonly liveIds: readonly string[];
 }
 
+type DiffState =
+  | { status: "loading" }
+  | { status: "ready"; patch: string }
+  | { status: "error"; message: string };
+
 function useDialogFocus<T extends HTMLElement>(open: boolean) {
   const ref = useRef<T>(null);
 
@@ -219,10 +237,13 @@ export default function App() {
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [changes, setChanges] = useState<GitChange[]>([]);
   const [selectedChange, setSelectedChange] = useState<string | null>(null);
-  const [diff, setDiff] = useState("");
+  const [diffState, setDiffState] = useState<DiffState>({ status: "loading" });
+  const [diffRetryKey, setDiffRetryKey] = useState(0);
   const [inspectorTab, setInspectorTab] = useState<"changes" | "files">("changes");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
+  const [sessionBrowserOpen, setSessionBrowserOpen] = useState(false);
+  const [handoffOpen, setHandoffOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentsLoading, setAgentsLoading] = useState(true);
   const [sessionsRefreshing, setSessionsRefreshing] = useState(false);
@@ -264,8 +285,9 @@ export default function App() {
   const refreshDiscoveredSessionsRef = useRef<(surfaceError?: boolean) => void | Promise<void>>(() => undefined);
   const statusFlushTimerRef = useRef<number | null>(null);
   const loadedWorkspaceIdRef = useRef<string | null>(null);
-  const loadedDiffKeyRef = useRef<string | null>(null);
   const agentPickerRef = useDialogFocus<HTMLElement>(agentPickerOpen);
+  const sessionBrowserRef = useDialogFocus<HTMLDivElement>(sessionBrowserOpen);
+  const handoffRef = useDialogFocus<HTMLDivElement>(handoffOpen);
   const settingsRef = useDialogFocus<HTMLElement>(settingsOpen);
   const connectionFor = (sessionId: string) => sessionRuntime.connectionBySessionId[sessionId];
 
@@ -289,7 +311,19 @@ export default function App() {
   const activeSessionCanResume = Boolean(
     activeSession && !activeSession.connected && !activeSession.running && activeSession.resumeHandle,
   );
-  const overlayOpen = paletteOpen || agentPickerOpen || settingsOpen;
+  const resumableWorkspaceSessions = activeWorkspace
+    ? selectResumableWorkspaceSessions(sessions, activeWorkspace.id)
+    : [];
+  const handoffSourceSessions = activeWorkspace
+    ? selectHandoffSourceSessions(sessions, activeWorkspace.id)
+    : [];
+  const installedAgentIds = new Set(installations
+    .filter((installation) => installation.installed && installation.executable)
+    .map((installation) => installation.agentId));
+  const canCreateHandoff = isTauri() && handoffSourceSessions.some((session) => (
+    [...installedAgentIds].some((agentId) => agentId !== session.agentId)
+  ));
+  const overlayOpen = paletteOpen || agentPickerOpen || sessionBrowserOpen || handoffOpen || settingsOpen;
   const prompt = activeSessionId ? drafts[activeSessionId] ?? "" : "";
   workspacesRef.current = workspaces;
   sessionsRef.current = sessions;
@@ -549,22 +583,19 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     if (!activeWorkspace || !selectedChange) {
-      loadedDiffKeyRef.current = null;
-      setDiff("");
+      setDiffState({ status: "ready", patch: "" });
       return () => { cancelled = true; };
     }
-    const diffKey = `${activeWorkspace.id}:${selectedChange}`;
-    if (loadedDiffKeyRef.current !== diffKey) setDiff("");
-    loadedDiffKeyRef.current = diffKey;
+    setDiffState({ status: "loading" });
     void getGitDiff(activeWorkspace.path, selectedChange)
       .then((nextDiff) => {
-        if (!cancelled) setDiff(nextDiff);
+        if (!cancelled) setDiffState({ status: "ready", patch: nextDiff });
       })
-      .catch(() => {
-        if (!cancelled) setDiff("Diff unavailable for this file.");
+      .catch((reason: unknown) => {
+        if (!cancelled) setDiffState({ status: "error", message: errorMessage(reason) });
       });
     return () => { cancelled = true; };
-  }, [activeWorkspace, contextRefreshKey, selectedChange]);
+  }, [activeWorkspace, contextRefreshKey, diffRetryKey, selectedChange]);
 
   useEffect(() => {
     let cancelled = false;
@@ -736,10 +767,11 @@ export default function App() {
     setSessionRuntime((current) => reduceSessionRuntime(current, { type: "review", sessionId }));
   }, []);
 
-  const createSession = useCallback(async (agentId: FirstClassAgentId) => {
+  const createSession = useCallback(async (agentId: FirstClassAgentId, initialDraft = "") => {
     await runIfNotInFlight(createSessionInFlightRef, async () => {
       if (!activeWorkspace) {
         setAgentPickerOpen(false);
+        setHandoffOpen(false);
         setError("Add a workspace before starting an agent session.");
         return;
       }
@@ -775,6 +807,9 @@ export default function App() {
       });
 
       setSessions((current) => [...current, session]);
+      if (initialDraft) {
+        setDrafts((current) => ({ ...current, [id]: initialDraft }));
+      }
       initializeTerminalBuffer(id);
       startingSessionIdsRef.current.add(id);
       setStartingSessionIds((current) => new Set(current).add(id));
@@ -785,9 +820,15 @@ export default function App() {
       try {
         const snapshot = await openSession(hostOpenRequest(session, activeWorkspace.path, launch.program, { type: "new" }), launch);
         setSessionRuntime((current) => reduceSessionRuntime(current, { type: "host-snapshot", snapshot }));
+        setHandoffOpen(false);
         queueMicrotask(() => promptRef.current?.focus());
       } catch (reason) {
         setSessions((current) => current.filter((candidate) => candidate.id !== id));
+        setDrafts((current) => {
+          const next = { ...current };
+          delete next[id];
+          return next;
+        });
         clearTerminalBuffer(id);
         setActiveSessionId((current) => current === id ? previousActiveSessionId : current);
         setError(`Could not start ${adapter.displayName}: ${errorMessage(reason)}`);
@@ -1046,12 +1087,30 @@ export default function App() {
     setAgentPickerOpen(true);
   }, []);
 
+  const openSessionBrowser = useCallback(() => {
+    if (!activeWorkspaceRef.current) {
+      setError("Add a workspace before browsing saved sessions.");
+      return;
+    }
+    setSessionBrowserOpen(true);
+  }, []);
+
+  const openHandoff = useCallback(() => {
+    if (!activeWorkspaceRef.current) {
+      setError("Add a workspace before sharing saved agent context.");
+      return;
+    }
+    setHandoffOpen(true);
+  }, []);
+
   const hasActiveWorkspace = activeWorkspace !== null;
   const hasActiveSession = activeSession !== null;
   const actions = useMemo<PaletteAction[]>(() => {
     const next: PaletteAction[] = [
       { id: "add-workspace", icon: "folder", label: "Add workspace", detail: "Open a local project", shortcut: "⇧⌘O", run: () => { void addWorkspace(); } },
       { id: "new-session", icon: "plus", label: "New agent session", detail: hasActiveWorkspace ? "Codex, Claude Code, or Pi" : "Add a workspace first", shortcut: "⇧⌘N", disabled: !hasActiveWorkspace, run: openAgentPicker },
+      { id: "browse-sessions", icon: "refresh", label: "Browse saved sessions", detail: hasActiveWorkspace ? "Resume Codex, Claude Code, or Pi history" : "Add a workspace first", disabled: !hasActiveWorkspace, run: openSessionBrowser },
+      { id: "cross-agent-handoff", icon: "message", label: "Hand off saved context", detail: isTauri() ? "Create an editable Markdown briefing for another agent" : "Available in the desktop app", disabled: !canCreateHandoff, run: openHandoff },
       { id: "refresh-sessions", icon: "refresh", label: "Refresh agent sessions", detail: "Discover saved and running CLI sessions", disabled: !hasActiveWorkspace || sessionsRefreshing, run: () => { void refreshDiscoveredSessions(true); } },
     ];
     if (hasActiveSession && terminalModeAvailable) {
@@ -1063,7 +1122,7 @@ export default function App() {
       { id: "settings", icon: "settings", label: "Open settings", detail: "Agents and keyboard shortcuts", shortcut: "⌘,", run: () => setSettingsOpen(true) },
     );
     return next;
-  }, [addWorkspace, effectiveMode, hasActiveSession, hasActiveWorkspace, openAgentPicker, refreshDiscoveredSessions, sessionsRefreshing, terminalModeAvailable]);
+  }, [addWorkspace, canCreateHandoff, effectiveMode, hasActiveSession, hasActiveWorkspace, openAgentPicker, openHandoff, openSessionBrowser, refreshDiscoveredSessions, sessionsRefreshing, terminalModeAvailable]);
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
@@ -1074,6 +1133,8 @@ export default function App() {
       if (event.key === "Escape" && overlayOpen) {
         claimShortcut();
         setAgentPickerOpen(false);
+        setSessionBrowserOpen(false);
+        setHandoffOpen(false);
         setPaletteOpen(false);
         setSettingsOpen(false);
         return;
@@ -1190,6 +1251,13 @@ export default function App() {
                     })}
                     <button type="button" className="new-session-row" onClick={openAgentPicker}>
                       <Icon name="plus" size={14} /> New session
+                    </button>
+                    <button type="button" className="new-session-row" onClick={openSessionBrowser}>
+                      <Icon name="refresh" size={14} /> Browse saved sessions
+                      {resumableWorkspaceSessions.length > 0 && <span className="sidebar-action-count">{resumableWorkspaceSessions.length}</span>}
+                    </button>
+                    <button type="button" className="new-session-row" disabled={!canCreateHandoff} onClick={openHandoff} title={canCreateHandoff ? "Create a Markdown briefing for a different agent" : "A resumable source and a different installed agent are required"}>
+                      <Icon name="message" size={14} /> Hand off context
                     </button>
                   </div>
                 )}
@@ -1426,7 +1494,17 @@ export default function App() {
             {selectedChange && (
               <div className="mini-diff">
                 <div className="diff-heading" title={selectedChange}>{basename(selectedChange)}</div>
-                <pre>{diff || "No text diff available."}</pre>
+                <Suspense fallback={<div className="diff-viewer-state" role="status">Loading diff viewer…</div>}>
+                  {diffState.status === "loading" && <DiffViewer state="loading" />}
+                  {diffState.status === "ready" && <DiffViewer state="ready" patch={diffState.patch} />}
+                  {diffState.status === "error" && (
+                    <DiffViewer
+                      state="error"
+                      error={diffState.message}
+                      onRetry={() => setDiffRetryKey((current) => current + 1)}
+                    />
+                  )}
+                </Suspense>
               </div>
             )}
           </div>
@@ -1454,6 +1532,39 @@ export default function App() {
               })}
             </div>
           </section>
+        </div>
+      )}
+
+      {sessionBrowserOpen && activeWorkspace && (
+        <div ref={sessionBrowserRef} tabIndex={-1} className="dialog-focus-scope">
+          <SessionBrowser
+            workspaceName={activeWorkspace.name}
+            workspaceId={activeWorkspace.id}
+            sessions={sessions}
+            installations={installations}
+            loading={sessionsRefreshing}
+            startingSessionIds={startingSessionIds}
+            onRefresh={() => { void refreshDiscoveredSessions(true); }}
+            onResume={(session) => {
+              setSessionBrowserOpen(false);
+              selectSession(session.id);
+              void connectSession(session);
+            }}
+            onClose={() => setSessionBrowserOpen(false)}
+          />
+        </div>
+      )}
+
+      {handoffOpen && activeWorkspace && (
+        <div ref={handoffRef} tabIndex={-1} className="dialog-focus-scope">
+          <SessionHandoffDialog
+            workspace={activeWorkspace}
+            sessions={sessions}
+            installations={installations}
+            generateExport={exportSessionHandoff}
+            onStart={(agentId, markdown) => { void createSession(agentId, markdown); }}
+            onCancel={() => setHandoffOpen(false)}
+          />
         </div>
       )}
 

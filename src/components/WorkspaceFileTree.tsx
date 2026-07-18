@@ -18,25 +18,31 @@ export interface WorkspaceTreeNode {
 }
 
 export interface WorkspaceTreeState {
-  collapsed: Set<string>;
+  expanded: Set<string>;
   activeId: string | null;
 }
 
 export function createWorkspaceTreeState(): WorkspaceTreeState {
-  return { collapsed: new Set(), activeId: null };
+  return {
+    expanded: new Set(),
+    activeId: null,
+  };
 }
 
 export function buildWorkspaceTree(entries: readonly FileEntry[]): WorkspaceTreeNode[] {
   const nodes: WorkspaceTreeNode[] = [];
   const ancestors: Array<{ depth: number; node: WorkspaceTreeNode }> = [];
+  const occurrences = new Map<string, number>();
 
-  entries.forEach((entry, index) => {
+  entries.forEach((entry) => {
     const depth = Number.isFinite(entry.depth) ? Math.max(0, entry.depth) : 0;
     while (ancestors.length && ancestors[ancestors.length - 1].depth >= depth) ancestors.pop();
     const parent = [...ancestors].reverse().find(({ node }) => node.entry.isDirectory)?.node ?? null;
+    const occurrence = occurrences.get(entry.relativePath) ?? 0;
+    occurrences.set(entry.relativePath, occurrence + 1);
     const node: WorkspaceTreeNode = {
       entry,
-      id: `${entry.relativePath}\u0000${index}`,
+      id: `${entry.relativePath}\u0000${occurrence}`,
       parentId: parent?.id ?? null,
       level: (parent?.level ?? 0) + 1,
       hasChildren: false,
@@ -65,14 +71,14 @@ export function buildWorkspaceTree(entries: readonly FileEntry[]): WorkspaceTree
   return nodes;
 }
 
-export function visibleWorkspaceNodes(nodes: readonly WorkspaceTreeNode[], collapsed: ReadonlySet<string>): WorkspaceTreeNode[] {
+export function visibleWorkspaceNodes(nodes: readonly WorkspaceTreeNode[], expanded: ReadonlySet<string>): WorkspaceTreeNode[] {
   const byId = new Map(nodes.map((node) => [node.id, node]));
   return nodes.filter((node) => {
     let parentId = node.parentId;
     while (parentId) {
       const parent = byId.get(parentId);
       if (!parent) break;
-      if (collapsed.has(parent.id)) return false;
+      if (!expanded.has(parent.id)) return false;
       parentId = parent.parentId;
     }
     return true;
@@ -85,13 +91,13 @@ export function transitionWorkspaceTree(
   nodeId: string,
   key: string,
 ): WorkspaceTreeState {
-  const visible = visibleWorkspaceNodes(nodes, state.collapsed);
+  const visible = visibleWorkspaceNodes(nodes, state.expanded);
   const node = nodes.find((candidate) => candidate.id === nodeId);
   if (!node) return state;
   const index = visible.findIndex((candidate) => candidate.id === node.id);
-  const collapsed = new Set(state.collapsed);
+  const expanded = new Set(state.expanded);
   let activeId = node.id;
-  const isCollapsed = collapsed.has(node.id);
+  const isExpanded = expanded.has(node.id);
 
   switch (key) {
     case "ArrowDown": activeId = visible[Math.min(index + 1, visible.length - 1)]?.id ?? node.id; break;
@@ -100,30 +106,30 @@ export function transitionWorkspaceTree(
     case "End": activeId = visible[visible.length - 1]?.id ?? node.id; break;
     case "ArrowRight":
       if (!node.hasChildren) break;
-      if (isCollapsed) collapsed.delete(node.id);
+      if (!isExpanded) expanded.add(node.id);
       else activeId = nodes.find((candidate) => candidate.parentId === node.id)?.id ?? node.id;
       break;
     case "ArrowLeft":
-      if (node.hasChildren && !isCollapsed) collapsed.add(node.id);
+      if (node.hasChildren && isExpanded) expanded.delete(node.id);
       else activeId = node.parentId ?? node.id;
       break;
     case "Enter":
     case " ":
       if (node.hasChildren) {
-        if (isCollapsed) collapsed.delete(node.id);
-        else collapsed.add(node.id);
+        if (isExpanded) expanded.delete(node.id);
+        else expanded.add(node.id);
       }
       break;
     default: return state;
   }
-  return { collapsed, activeId };
+  return { expanded, activeId };
 }
 
 export function WorkspaceFileTree({ entries, label = "Workspace files" }: WorkspaceFileTreeProps) {
   const nodes = useMemo(() => buildWorkspaceTree(entries), [entries]);
   const [treeState, setTreeState] = useState<WorkspaceTreeState>(createWorkspaceTreeState);
   const rowRefs = useRef(new Map<string, HTMLElement>());
-  const visible = useMemo(() => visibleWorkspaceNodes(nodes, treeState.collapsed), [nodes, treeState.collapsed]);
+  const visible = useMemo(() => visibleWorkspaceNodes(nodes, treeState.expanded), [nodes, treeState.expanded]);
   const effectiveActiveId = visible.some((node) => node.id === treeState.activeId) ? treeState.activeId : visible[0]?.id ?? null;
 
   const focusNode = (id: string) => {
@@ -151,7 +157,7 @@ export function WorkspaceFileTree({ entries, label = "Workspace files" }: Worksp
   return (
     <div className="workspace-file-tree" role="tree" aria-label={label}>
       {visible.map((node) => {
-        const isOpen = node.hasChildren && !treeState.collapsed.has(node.id);
+        const isOpen = node.hasChildren && treeState.expanded.has(node.id);
         const commonProps = {
           role: "treeitem",
           "aria-level": node.level,
@@ -164,7 +170,7 @@ export function WorkspaceFileTree({ entries, label = "Workspace files" }: Worksp
           onFocus: () => setTreeState((current) => ({ ...current, activeId: node.id })),
           onKeyDown: (event: KeyboardEvent<HTMLElement>) => onKeyDown(event, node),
         };
-        const contents = <><span className={`tree-chevron ${isOpen ? "is-open" : ""}`}>{node.hasChildren && <Icon name="chevron" size={12} />}</span><Icon className="tree-entry-icon" name={node.entry.isDirectory ? (isOpen ? "folderOpen" : "folder") : "file"} size={15} /><span className="tree-entry-name">{node.entry.name}</span></>;
+        const contents = <><span className={`tree-chevron ${isOpen ? "is-open" : ""}`}>{node.hasChildren && <Icon name="chevron" size={12} />}</span><Icon className="tree-entry-icon" name={node.entry.isDirectory ? "folder" : "file"} size={15} /><span className="tree-entry-name">{node.entry.name}</span></>;
         const ref = (element: HTMLElement | null) => { if (element) rowRefs.current.set(node.id, element); else rowRefs.current.delete(node.id); };
         return node.hasChildren ? (
           <button {...commonProps} type="button" aria-expanded={isOpen} key={node.id} ref={ref} onClick={(event) => onFolderClick(event, node)}>{contents}</button>

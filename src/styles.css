@@ -304,7 +304,6 @@ button.workspace-tree-row { cursor: pointer; }
 .tree-chevron { width: 12px; height: 12px; flex: 0 0 12px; display: grid; place-items: center; color: #858585; transition: transform 120ms ease; }
 .tree-chevron.is-open { transform: rotate(90deg); }
 .tree-entry-icon { flex: 0 0 auto; color: #777773; }
-.is-folder .tree-entry-icon { color: #a06b20; fill: #f4d9a4; stroke-width: 1.5; }
 .tree-entry-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .change-list { padding: 0 7px 9px; }
 .change-list button { width: 100%; min-height: 31px; border: 0; border-radius: 6px; background: transparent; color: #a9bed1; display: flex; align-items: center; gap: 7px; padding: 0 8px; font-size: 10.5px; cursor: pointer; text-align: left; }
@@ -319,8 +318,6 @@ button.workspace-tree-row { cursor: pointer; }
 .inspector-error { margin: 7px; padding: 9px 10px; border: 1px solid #68454a; border-radius: 7px; background: #2f2029; color: #e5a29d; font-size: 9.5px; line-height: 1.45; }
 .mini-diff { border-top: 1px solid var(--border); }
 .diff-heading { position: sticky; top: 0; padding: 11px 12px; background: #0d213be8; backdrop-filter: blur(12px); border-bottom: 1px solid #1a3654; color: #c2d4e6; font-size: 10px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mini-diff pre { margin: 0; padding: 11px 10px 26px; color: #9fb4c8; font-family: "SF Mono", Menlo, monospace; font-size: 8.5px; line-height: 1.58; white-space: pre-wrap; word-break: break-word; }
-.mini-diff pre::first-line { color: #77a7d1; }
 
 .palette-backdrop, .picker-backdrop { position: fixed; inset: 0; z-index: 50; display: flex; justify-content: center; background: #020916a8; backdrop-filter: blur(7px); }
 .palette-backdrop { align-items: flex-start; padding-top: 12vh; }
@@ -464,8 +461,6 @@ kbd { color: #555555; background: #eeeeec; border-color: #d1d1cd; box-shadow: in
 .inspector-empty { color: #777777; }
 .inspector-error { border-color: #e5b9b9; background: #fff0f0; color: #9f3030; }
 .diff-heading { background: #fffffff2; border-color: #dededb; color: #353535; }
-.mini-diff pre { color: #4f4f4f; }
-.mini-diff pre::first-line { color: #606060; }
 .palette-backdrop, .picker-backdrop { background: #25252573; }
 .command-palette, .agent-picker, .settings-dialog { background: #ffffff; border-color: #cececa; box-shadow: 0 30px 90px #0000002e; }
 .palette-input-row { border-color: #dededb; color: #737373; }
@@ -486,6 +481,73 @@ kbd { color: #555555; background: #eeeeec; border-color: #d1d1cd; box-shadow: in
 .shortcut-grid { color: #555555; }
 .error-toast { background: #fff0f0f2; border-color: #dca9a9; box-shadow: 0 18px 55px #00000024; color: #922f2f; }
 .error-toast button { border-color: #d5a5a5; background: #ffe1e1; color: #852828; }
+
+/* Saved-session navigation and cross-agent handoff */
+.new-session-row:disabled { opacity: .42; cursor: default; }
+.new-session-row:disabled:hover { color: #747474; background: transparent; }
+.sidebar-action-count { margin-left: auto; min-width: 18px; padding: 1px 5px; border-radius: 999px; background: #e5e5e2; color: #555555; text-align: center; font-size: 8.5px; }
+.dialog-focus-scope { display: contents; }
+.session-browser-backdrop, .session-handoff-backdrop { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 30px; background: #25252573; backdrop-filter: blur(7px); }
+.session-browser-modal, .session-handoff-dialog { width: min(720px, calc(100vw - 60px)); max-height: calc(100vh - 70px); display: flex; flex-direction: column; overflow: hidden; background: #ffffff; border: 1px solid #cececa; border-radius: 16px; box-shadow: 0 30px 90px #0000002e; }
+.session-browser-header, .session-handoff-header { padding: 22px 24px 17px; border-bottom: 1px solid #dededb; }
+.session-browser-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.session-browser-header h2, .session-handoff-header h2 { margin: 0; color: #202020; font-size: 21px; letter-spacing: -.025em; }
+.session-browser-header p, .session-handoff-header > p:last-child { margin: 6px 0 0; color: #707070; font-size: 11px; line-height: 1.5; }
+.session-browser-header > button { border: 0; border-radius: 7px; padding: 6px 9px; background: #eeeeec; color: #555555; font-size: 10px; cursor: pointer; }
+.session-browser-controls { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto; align-items: end; gap: 12px; padding: 14px 24px; border-bottom: 1px solid #dededb; background: #fafaf9; }
+.session-browser-controls > label { min-width: 0; display: flex; flex-direction: column; gap: 5px; color: #555555; font-size: 9.5px; }
+.session-browser-controls input[type="search"] { width: 100%; height: 34px; border: 1px solid #cececa; border-radius: 8px; padding: 0 10px; background: #ffffff; color: #202020; }
+.session-browser-controls fieldset { height: 34px; display: flex; align-items: center; gap: 3px; margin: 0; padding: 2px; border: 1px solid #cececa; border-radius: 8px; background: #eeeeec; }
+.session-browser-controls legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.session-browser-controls fieldset label { position: relative; padding: 6px 8px; border-radius: 6px; color: #666666; font-size: 9.5px; cursor: pointer; }
+.session-browser-controls fieldset label:has(input:checked) { background: #ffffff; color: #171717; box-shadow: 0 1px 3px #00000014; }
+.session-browser-controls fieldset input { position: absolute; opacity: 0; pointer-events: none; }
+.session-browser-controls > button, .session-browser-item > button { height: 34px; border: 1px solid #c9c9c5; border-radius: 8px; padding: 0 11px; background: #ffffff; color: #333333; font-size: 10px; font-weight: 650; cursor: pointer; }
+.session-browser-controls > button:disabled, .session-browser-item > button:disabled { opacity: .42; cursor: default; }
+.session-browser-scroll { min-height: 220px; max-height: min(480px, 58vh); overflow: auto; scrollbar-width: thin; }
+.session-browser-list { display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 12px; list-style: none; }
+.session-browser-item { display: flex; align-items: center; gap: 11px; min-height: 68px; padding: 10px 11px; border: 1px solid #dededb; border-radius: 10px; background: #fafaf9; }
+.session-browser-session-details { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
+.session-browser-session-details strong { overflow: hidden; color: #252525; font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.session-browser-provider { color: #666666; font-size: 9px; font-weight: 720; text-transform: uppercase; letter-spacing: .06em; }
+.session-browser-session-details time, .session-browser-session-details small { color: #777777; font-size: 9px; line-height: 1.4; }
+.session-browser-session-details small { color: #9f3030; }
+.session-browser-state { margin: 0; padding: 52px 24px; color: #707070; text-align: center; font-size: 11px; }
+
+.session-handoff-dialog { width: min(760px, calc(100vw - 60px)); }
+.session-handoff-eyebrow { margin: 0 0 7px; color: #686868; font-size: 9px; font-weight: 760; letter-spacing: .09em; text-transform: uppercase; }
+.session-handoff-step { min-height: 220px; overflow: auto; padding: 18px 24px; }
+.session-handoff-step fieldset { display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 0; border: 0; }
+.session-handoff-step legend { margin-bottom: 9px; color: #353535; font-size: 11px; font-weight: 680; }
+.session-handoff-option { display: flex; align-items: center; gap: 10px; min-height: 56px; padding: 9px 10px; border: 1px solid #dededb; border-radius: 10px; background: #fafaf9; cursor: pointer; }
+.session-handoff-option:has(input:checked) { border-color: #a9a9a4; background: #eeeeec; }
+.session-handoff-option > input { accent-color: #202020; }
+.session-handoff-option > span:last-child { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 4px; }
+.session-handoff-option strong { overflow: hidden; color: #252525; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.session-handoff-option small { color: #707070; font-size: 9px; }
+.session-handoff-empty { padding: 32px 12px; color: #707070; text-align: center; font-size: 11px; }
+.session-handoff-error, .session-handoff-warning { margin: 12px 0 0; padding: 9px 10px; border: 1px solid #e5b9b9; border-radius: 8px; background: #fff0f0; color: #9f3030; font-size: 10px; }
+.session-handoff-target-summary { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; color: #555555; font-size: 11px; }
+.session-handoff-warnings { margin-bottom: 12px; padding: 10px 12px; border: 1px solid #ead7aa; border-radius: 8px; background: #fff8e8; color: #704800; font-size: 9.5px; }
+.session-handoff-warnings ul { margin: 6px 0 0; padding-left: 17px; }
+.session-handoff-editor { display: flex; flex-direction: column; gap: 6px; color: #454545; font-size: 10px; font-weight: 650; }
+.session-handoff-editor textarea { width: 100%; min-height: 290px; resize: vertical; border: 1px solid #cececa; border-radius: 9px; padding: 12px; background: #ffffff; color: #252525; font-family: "SF Mono", Menlo, monospace; font-size: 10px; font-weight: 400; line-height: 1.55; }
+.session-handoff-privacy { display: flex; gap: 9px; padding: 11px 24px; border-top: 1px solid #dededb; background: #fafaf9; color: #707070; font-size: 9.5px; line-height: 1.45; }
+.session-handoff-privacy strong { flex: 0 0 auto; color: #444444; }
+.session-handoff-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 13px 24px 17px; border-top: 1px solid #dededb; }
+.session-handoff-actions button { border: 1px solid #c9c9c5; border-radius: 8px; padding: 8px 11px; background: #ffffff; color: #444444; font-size: 10px; font-weight: 650; cursor: pointer; }
+.session-handoff-actions button:disabled { opacity: .4; cursor: default; }
+.session-handoff-actions .session-handoff-cancel { margin-right: auto; }
+.session-handoff-actions .session-handoff-primary { border-color: #111111; background: #202020; color: #ffffff; }
+
+/* Diffs.com / @pierre/diffs keeps code rendering local in the webview. */
+.mini-diff { min-width: 0; overflow: hidden; background: #ffffff; }
+.diff-viewer { min-width: 0; color: #303030; font-family: "SF Mono", Menlo, monospace; font-size: 9px; }
+.diff-viewer-state { padding: 18px 12px 24px; color: #707070; font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; font-size: 10.5px; line-height: 1.5; }
+.diff-viewer-state p { margin: 0 0 9px; }
+.diff-viewer-state button { border: 1px solid #c9c9c5; border-radius: 7px; padding: 6px 9px; background: #f7f7f6; color: #333333; font-size: 9.5px; cursor: pointer; }
+.diff-viewer-warning { padding: 8px 10px; border-bottom: 1px solid #ead7aa; background: #fff8e8; color: #704800; font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; font-size: 9px; line-height: 1.4; }
+.diff-viewer > * { min-width: 0; }
 
 @media (max-width: 1180px) {
   .app-shell { grid-template-columns: 238px minmax(462px, 1fr) 300px; }

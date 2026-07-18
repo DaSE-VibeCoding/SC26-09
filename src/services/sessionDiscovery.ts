@@ -13,6 +13,25 @@ function timestamp(milliseconds: number, fallback: string): string {
   return new Date(milliseconds).toISOString();
 }
 
+/**
+ * Select saved sessions that can be resumed in a workspace. A resume handle is
+ * deliberately required from discovery/storage; provider ids are not handles.
+ */
+export function selectResumableWorkspaceSessions(
+  sessions: readonly AgentSession[],
+  workspaceId: string,
+): AgentSession[] {
+  return sessions
+    .filter((session) => (
+      session.workspaceId === workspaceId
+      && !session.connected
+      && !session.running
+      && typeof session.resumeHandle === "string"
+      && session.resumeHandle.trim().length > 0
+    ))
+    .sort((left, right) => right.lastActivityAt.localeCompare(left.lastActivityAt));
+}
+
 function rebuildProviderIndex(sessions: AgentSession[]): Map<string, number> {
   const indexByProviderId = new Map<string, number>();
   sessions.forEach((session, index) => {

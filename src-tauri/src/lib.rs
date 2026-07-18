@@ -13,7 +13,7 @@ use session_host::{
     session_list, session_open, session_resize, session_send, session_stop, terminal_list_sessions,
     terminal_resize, terminal_spawn, terminal_stop, terminal_write, SessionHost,
 };
-use sessions::discover_agent_sessions;
+use sessions::{discover_agent_sessions, export_session_handoff};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -24,6 +24,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             discover_agents,
             discover_agent_sessions,
+            export_session_handoff,
             list_workspace_files,
             git_changes,
             git_diff,

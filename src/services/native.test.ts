@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { openSession, spawnTerminal, writeTerminal, stopTerminal, isTauri } from "./native";
+import { exportSessionHandoff, openSession, spawnTerminal, writeTerminal, stopTerminal, isTauri } from "./native";
 import { SESSION_HOST_PROTOCOL_VERSION } from "../domain/sessionHost";
 
 describe("native terminal guards", () => {
@@ -29,5 +29,12 @@ describe("native terminal guards", () => {
       protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId: "s", agentId: "codex", workspacePath: "/tmp", title: "Test",
       transport: { type: "pty-fallback", executable: "/bin/cat" }, terminalSize: { rows: 24, cols: 80 }, recovery: { type: "new" },
     }, { program: "/bin/echo", args: ["secret"], env: { TOKEN: "secret" } })).rejects.toThrow(/does not match/);
+  });
+
+  it("does not fabricate a cross-agent export outside the desktop app", async () => {
+    await expect(exportSessionHandoff({
+      workspacePath: "/tmp",
+      sources: [{ agentId: "codex", externalSessionId: "thread-1", resumeHandle: "thread-1" }],
+    })).rejects.toThrow(/Pelican desktop app/);
   });
 });
