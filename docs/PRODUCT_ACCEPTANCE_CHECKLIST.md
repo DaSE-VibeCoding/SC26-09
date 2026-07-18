@@ -23,7 +23,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 | Real-time idle/running/waiting/completed status | Missing at product level | Current PTY heuristics can show startup, activity, attention text, and process exit. Private Codex and Pi fixture decoders normalize success, failure, interruption, and correlated attention, but no production app-server/RPC binding emits those events; Claude hooks also remain absent, so normal completed turns can remain `Working`. |
 | Left sidebar organizes workspaces, agents, sessions | Partial | Workspaces and sessions have agent logos, status text, unread state, and shortcuts. There is no independent collapse, grouping/filtering, global attention inbox, rename, archive, or pinning. |
 | Right sidebar shows files and Git context | Substantially implemented | Files use a collapsible, keyboard-navigable read-only tree with distinct folder icons; modified files, staged/unstaged/untracked diffs, refresh, empty, and error states exist. File open/search, non-Git labeling, richer diff feedback, and browser assistive-technology smoke remain. |
-| Friendly command interface | Partial | The composer sends text to the connected PTY, preserves drafts, and has fixture-verified readiness gating/copy. It has no conversation transcript, tool progress, approvals, structured streaming, real readiness handshake producer, or turn-level interrupt. |
+| Friendly command interface | Partial | The composer sends text to the connected PTY, preserves drafts, and has fixture-verified readiness gating/copy plus a host-authoritative normalized readiness channel. It has no conversation transcript, tool progress, approvals, structured streaming, provider readiness producer, or turn-level interrupt. |
 | Integrated terminal and direct control | Implemented for Pelican-owned PTYs | The in-process SessionHost owns PTY spawn, stream-scoped input/resize/stop, ordered events, and bounded UI buffering. External Codex/Pi foreground terminals cannot be reattached at the OS PTY level. |
 | Native notifications | Partial | Permission UI and focus-aware attention/process-exit notifications exist. Normal task completion is not known reliably while an interactive CLI remains open. |
 | Keyboard-first operation | Partial | Command palette and core shortcuts exist. Complete panel navigation, lifecycle actions, file-tree navigation, customization, and accessibility validation are missing. |
@@ -51,7 +51,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 | Resume saved history | `codex resume`, implemented path | `--resume`, implemented path | `--session <absolute path>`, implemented path |
 | Attach a live external session | Not for arbitrary TUI | Background `claude attach` only | Not for arbitrary TUI |
 | Authoritative live lifecycle | Fixture foundation only (CX-01A/LC-02D; no production binding) | Missing | Fixture foundation only (PI-01A serialized prompt/settlement subset; no production binding) |
-| Authoritative prompt readiness producer | Missing | Missing | Missing |
+| Authoritative prompt readiness producer | Host channel only; provider producer missing | Host channel only; provider producer missing | Host channel only; provider producer missing |
 | Target structured transport | Long-lived app-server | Lifecycle hooks/background inventory | RPC or extension events |
 
 ## Implementation checklist by workflow
@@ -97,7 +97,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 - [x] A fresh welcome TUI begins `Idle`, not `Working`.
 - [x] Prevent duplicate resume/attach clicks with an immediate in-flight lock.
 - [x] Prevent duplicate new-session launches before React rerenders.
-- [ ] MISSING — Wait for an agent-ready handshake before enabling prompt submission. CAP-01A adds fixture policy/readiness copy only; fallback PTY remains sendable and no provider readiness producer exists.
+- [ ] PARTIAL — Wait for an agent-ready handshake before enabling prompt submission. CAP-01B makes readiness host-authoritative and replayable, but fallback PTY remains sendable and no provider readiness producer exists.
 - [ ] PARTIAL — Reconcile every new session with its provider ID and saved resume handle.
 
 ### Resume and attach
