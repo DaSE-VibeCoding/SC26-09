@@ -123,7 +123,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 
 ### Terminal surface
 
-- [x] Prompt/Terminal switching keeps one PTY and does not spawn a second agent.
+- [x] PTY bindings keep Prompt/Terminal switching on one PTY; protocol bindings are Prompt-only and never mount a fake terminal.
 - [x] Input, resize, focus, ANSI rendering, UTF-8 split handling, and bounded replay exist.
 - [x] A disconnected Terminal tab shows an honest recovery screen instead of a fake welcome TUI.
 - [x] A hidden terminal is inert and removed entirely for disconnected sessions.
@@ -169,7 +169,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 ### Keyboard and accessibility
 
 - [x] `⌘K`, palette filtering, arrow selection, Enter, Escape, focus trap, and focus restoration exist.
-- [x] `⇧⌘N`, `⇧⌘O`, `⇧⌘G`, `⇧⌘E`, `⌘,`, Control-backtick, `⌘1…9`, and `⌘Enter` exist.
+- [x] `⇧⌘N`, `⇧⌘O`, `⇧⌘G`, `⇧⌘E`, `⌘,`, capability-gated Control-backtick, `⌘1…9`, and `⌘Enter` exist.
 - [x] Focus-visible and reduced-motion styles exist.
 - [ ] PARTIAL — Ensure global shortcuts never corrupt direct terminal input.
 - [ ] MISSING — Next/previous workspace/session, focus-panel, stop/resume, and refresh shortcuts.
@@ -217,7 +217,7 @@ Run every item for **Codex, Claude Code, and Pi**:
 - [ ] Confirm file/Git context refreshes without stealing selection or focus.
 - [ ] Trigger an approval or user question and confirm `Working → Needs attention`.
 - [ ] With Pelican unfocused, receive exactly one correctly named notification.
-- [ ] Reply in Prompt mode, then use Terminal mode, proving both control the same conversation.
+- [ ] For a PTY binding, reply in Prompt mode and then use Terminal mode, proving both control the same conversation; for a protocol binding, confirm Terminal controls are absent.
 - [ ] Confirm `Needs attention → Working` after the response.
 - [ ] Let the turn finish while keeping the CLI open; confirm `Working → Done`.
 - [ ] Open the result; confirm unread clears and `Done → Idle`.
