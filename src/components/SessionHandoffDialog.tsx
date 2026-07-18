@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { FirstClassAgentId } from "../agents/types";
 import { getAgentAdapter } from "../agents/registry";
 import type { AgentInstallation, AgentSession, Workspace } from "../domain/models";
@@ -17,17 +17,40 @@ export interface SessionHandoffDialogProps {
   sessions: readonly AgentSession[];
   installations: readonly AgentInstallation[];
   generateExport(request: SessionHandoffExportRequest): Promise<SessionHandoffExportResponse>;
-  onStart(targetAgentId: FirstClassAgentId, editedMarkdown: string): void;
+  starting: boolean;
+  onDirtyChange(dirty: boolean): void;
+  onStart(targetAgentId: FirstClassAgentId, editedMarkdown: string): Promise<void>;
   onCancel(): void;
 }
 
 type HandoffStep = "sources" | "target" | "review";
+
+export function handoffGenerationErrorVisible(step: HandoffStep, failed: boolean): boolean {
+  return failed && (step === "target" || step === "review");
+}
+
+export function isBriefingDirty(
+  step: HandoffStep,
+  generatedMarkdown: string | null,
+  markdown: string,
+): boolean {
+  return step === "review" && generatedMarkdown !== null && markdown !== generatedMarkdown;
+}
+
+export function handoffStartButtonState(markdown: string, starting: boolean) {
+  return {
+    disabled: !markdown.trim() || starting,
+    label: starting ? "Starting…" : "Start with briefing",
+  };
+}
 
 export function SessionHandoffDialog({
   workspace,
   sessions,
   installations,
   generateExport,
+  starting,
+  onDirtyChange,
   onStart,
   onCancel,
 }: SessionHandoffDialogProps) {
@@ -44,6 +67,14 @@ export function SessionHandoffDialog({
   const [generationFailed, setGenerationFailed] = useState(false);
   const selectedSources = eligibleSources.filter((session) => selectedIds.includes(session.id));
   const targetAgents = selectHandoffTargetAgents(installations, selectedSources);
+  const briefingDirty = isBriefingDirty(step, generated?.markdown ?? null, markdown);
+  const startButton = handoffStartButtonState(markdown, starting);
+
+  useEffect(() => {
+    onDirtyChange(briefingDirty);
+  }, [briefingDirty, onDirtyChange]);
+
+  useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
 
   const generate = async () => {
     if (!targetAgentId || !targetAgents.includes(targetAgentId)) return;
@@ -127,7 +158,6 @@ export function SessionHandoffDialog({
               })}
               {targetAgents.length === 0 && <p className="session-handoff-empty">No different installed agent is available for this selection.</p>}
             </fieldset>
-            {generationFailed && <p className="session-handoff-error" role="alert">The handoff could not be generated. Try again.</p>}
           </div>
         )}
 
@@ -151,6 +181,10 @@ export function SessionHandoffDialog({
           </div>
         )}
 
+        {handoffGenerationErrorVisible(step, generationFailed) && (
+          <p className="session-handoff-error" role="alert">The handoff could not be generated. Your current briefing was kept; try again.</p>
+        )}
+
         <aside className="session-handoff-privacy">
           <strong>Privacy reminder</strong>
           <span>The export contains visible user and assistant text only, but that text may include code or secrets you pasted. Tool data, hidden reasoning, and provider metadata are excluded. Review it before starting.</span>
@@ -163,7 +197,7 @@ export function SessionHandoffDialog({
           {step === "sources" && <button type="button" className="session-handoff-primary" disabled={selectedSources.length === 0} onClick={() => setStep("target")}>Choose target</button>}
           {step === "target" && <button type="button" className="session-handoff-primary" disabled={!targetAgentId || generating} onClick={() => void generate()}>{generating ? "Generating…" : generationFailed ? "Try again" : "Generate briefing"}</button>}
           {step === "review" && <button type="button" className="session-handoff-regenerate" disabled={generating} onClick={() => void generate()}>Regenerate</button>}
-          {step === "review" && <button type="button" className="session-handoff-primary" disabled={!markdown.trim()} onClick={() => onStart(targetAgentId!, markdown)}>Start with briefing</button>}
+          {step === "review" && <button type="button" className="session-handoff-primary" disabled={startButton.disabled} onClick={() => { void onStart(targetAgentId!, markdown); }}>{startButton.label}</button>}
         </footer>
       </section>
     </div>

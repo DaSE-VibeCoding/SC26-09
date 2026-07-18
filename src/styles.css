@@ -527,6 +527,7 @@ kbd { color: #555555; background: #eeeeec; border-color: #d1d1cd; box-shadow: in
 .session-handoff-option small { color: #707070; font-size: 9px; }
 .session-handoff-empty { padding: 32px 12px; color: #707070; text-align: center; font-size: 11px; }
 .session-handoff-error, .session-handoff-warning { margin: 12px 0 0; padding: 9px 10px; border: 1px solid #e5b9b9; border-radius: 8px; background: #fff0f0; color: #9f3030; font-size: 10px; }
+.session-handoff-dialog > .session-handoff-error { margin: 0 24px 12px; }
 .session-handoff-target-summary { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; color: #555555; font-size: 11px; }
 .session-handoff-warnings { margin-bottom: 12px; padding: 10px 12px; border: 1px solid #ead7aa; border-radius: 8px; background: #fff8e8; color: #704800; font-size: 9.5px; }
 .session-handoff-warnings ul { margin: 6px 0 0; padding-left: 17px; }

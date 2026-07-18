@@ -1,6 +1,6 @@
 import { invoke, isTauri as coreIsTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
 import type {
   AgentInstallation,
   DiscoveredAgentSession,
@@ -40,6 +40,16 @@ export async function chooseWorkspace(): Promise<string | null> {
   if (!isTauri()) return null;
   const result = await open({ directory: true, multiple: false, title: "Add workspace" });
   return typeof result === "string" ? result : null;
+}
+
+export async function confirmDiscard(message: string): Promise<boolean> {
+  if (!isTauri()) return typeof window !== "undefined" && window.confirm(message);
+  return confirm(message, {
+    title: "Pelican",
+    kind: "warning",
+    okLabel: "Discard",
+    cancelLabel: "Keep editing",
+  });
 }
 
 export async function discoverAgents(): Promise<AgentInstallation[]> {

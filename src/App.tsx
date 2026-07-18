@@ -1,9 +1,10 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { agentRegistry, getAgentAdapter } from "./agents/registry";
 import type { FirstClassAgentId } from "./agents/types";
 import { AgentLogo } from "./components/AgentLogo";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
 import { Icon } from "./components/Icon";
+import { LazyDiffViewer } from "./components/LazyDiffViewer";
 import { PelicanLogo } from "./components/PelicanLogo";
 import { PromptComposer } from "./components/PromptComposer";
 import { SessionBrowser } from "./components/SessionBrowser";
@@ -38,6 +39,7 @@ import {
 import { reduceSessionStatus, scanTerminalAttention, TURN_IDLE_MS } from "./domain/status";
 import {
   chooseWorkspace,
+  confirmDiscard,
   discoverAgentSessions,
   discoverAgents,
   exportSessionHandoff,
@@ -70,16 +72,12 @@ import {
   notify,
 } from "./services/notifications";
 import { runIfNotInFlight } from "./services/actionLock";
+import { beginDiffFetch, type DiffState } from "./services/gitDiffState";
 import {
   appendTerminalBuffer,
   clearTerminalBuffer,
   initializeTerminalBuffer,
 } from "./services/terminalBuffer";
-
-const DiffViewer = lazy(async () => {
-  const module = await import("./components/DiffViewer");
-  return { default: module.DiffViewer };
-});
 
 function basename(path: string): string {
   return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
@@ -165,11 +163,6 @@ interface DiscoveryCleanupPlan {
   readonly liveIds: readonly string[];
 }
 
-type DiffState =
-  | { status: "loading" }
-  | { status: "ready"; patch: string }
-  | { status: "error"; message: string };
-
 function useDialogFocus<T extends HTMLElement>(open: boolean) {
   const ref = useRef<T>(null);
 
@@ -244,6 +237,8 @@ export default function App() {
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
   const [sessionBrowserOpen, setSessionBrowserOpen] = useState(false);
   const [handoffOpen, setHandoffOpen] = useState(false);
+  const [handoffDirty, setHandoffDirty] = useState(false);
+  const [handoffStarting, setHandoffStarting] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentsLoading, setAgentsLoading] = useState(true);
   const [sessionsRefreshing, setSessionsRefreshing] = useState(false);
@@ -285,6 +280,7 @@ export default function App() {
   const refreshDiscoveredSessionsRef = useRef<(surfaceError?: boolean) => void | Promise<void>>(() => undefined);
   const statusFlushTimerRef = useRef<number | null>(null);
   const loadedWorkspaceIdRef = useRef<string | null>(null);
+  const loadedDiffKeyRef = useRef<string | null>(null);
   const agentPickerRef = useDialogFocus<HTMLElement>(agentPickerOpen);
   const sessionBrowserRef = useDialogFocus<HTMLDivElement>(sessionBrowserOpen);
   const handoffRef = useDialogFocus<HTMLDivElement>(handoffOpen);
@@ -583,10 +579,13 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     if (!activeWorkspace || !selectedChange) {
+      loadedDiffKeyRef.current = null;
       setDiffState({ status: "ready", patch: "" });
       return () => { cancelled = true; };
     }
-    setDiffState({ status: "loading" });
+    const diffKey = `${activeWorkspace.id}:${selectedChange}`;
+    setDiffState((current) => beginDiffFetch(current, loadedDiffKeyRef.current, diffKey));
+    loadedDiffKeyRef.current = diffKey;
     void getGitDiff(activeWorkspace.path, selectedChange)
       .then((nextDiff) => {
         if (!cancelled) setDiffState({ status: "ready", patch: nextDiff });
@@ -772,6 +771,7 @@ export default function App() {
       if (!activeWorkspace) {
         setAgentPickerOpen(false);
         setHandoffOpen(false);
+        setHandoffDirty(false);
         setError("Add a workspace before starting an agent session.");
         return;
       }
@@ -821,6 +821,7 @@ export default function App() {
         const snapshot = await openSession(hostOpenRequest(session, activeWorkspace.path, launch.program, { type: "new" }), launch);
         setSessionRuntime((current) => reduceSessionRuntime(current, { type: "host-snapshot", snapshot }));
         setHandoffOpen(false);
+        setHandoffDirty(false);
         queueMicrotask(() => promptRef.current?.focus());
       } catch (reason) {
         setSessions((current) => current.filter((candidate) => candidate.id !== id));
@@ -842,6 +843,15 @@ export default function App() {
       }
     });
   }, [activeSessionId, activeWorkspace, installations]);
+
+  const startHandoffSession = useCallback(async (agentId: FirstClassAgentId, markdown: string) => {
+    setHandoffStarting(true);
+    try {
+      await createSession(agentId, markdown);
+    } finally {
+      setHandoffStarting(false);
+    }
+  }, [createSession]);
 
   const connectSession = useCallback(async (target: AgentSession) => {
     if (target.connected || startingSessionIdsRef.current.has(target.id)) return;
@@ -1100,8 +1110,22 @@ export default function App() {
       setError("Add a workspace before sharing saved agent context.");
       return;
     }
+    setHandoffDirty(false);
     setHandoffOpen(true);
   }, []);
+
+  const requestCloseHandoff = useCallback(async () => {
+    if (handoffDirty) {
+      try {
+        if (!await confirmDiscard("Discard your edited handoff briefing?")) return;
+      } catch (reason) {
+        setError(`Could not open the discard confirmation: ${errorMessage(reason)}`);
+        return;
+      }
+    }
+    setHandoffOpen(false);
+    setHandoffDirty(false);
+  }, [handoffDirty]);
 
   const hasActiveWorkspace = activeWorkspace !== null;
   const hasActiveSession = activeSession !== null;
@@ -1132,9 +1156,12 @@ export default function App() {
       };
       if (event.key === "Escape" && overlayOpen) {
         claimShortcut();
+        if (handoffOpen) {
+          void requestCloseHandoff();
+          return;
+        }
         setAgentPickerOpen(false);
         setSessionBrowserOpen(false);
-        setHandoffOpen(false);
         setPaletteOpen(false);
         setSettingsOpen(false);
         return;
@@ -1172,7 +1199,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handleKey, true);
     return () => window.removeEventListener("keydown", handleKey, true);
-  }, [addWorkspace, openAgentPicker, overlayOpen, selectSession, terminalModeAvailable]);
+  }, [addWorkspace, handoffOpen, openAgentPicker, overlayOpen, requestCloseHandoff, selectSession, terminalModeAvailable]);
 
   return (
     <main className={`app-shell${isTauri() ? "" : " has-preview-banner"}`}>
@@ -1494,17 +1521,15 @@ export default function App() {
             {selectedChange && (
               <div className="mini-diff">
                 <div className="diff-heading" title={selectedChange}>{basename(selectedChange)}</div>
-                <Suspense fallback={<div className="diff-viewer-state" role="status">Loading diff viewer…</div>}>
-                  {diffState.status === "loading" && <DiffViewer state="loading" />}
-                  {diffState.status === "ready" && <DiffViewer state="ready" patch={diffState.patch} />}
-                  {diffState.status === "error" && (
-                    <DiffViewer
-                      state="error"
-                      error={diffState.message}
-                      onRetry={() => setDiffRetryKey((current) => current + 1)}
-                    />
-                  )}
-                </Suspense>
+                {diffState.status === "loading" && <LazyDiffViewer state="loading" />}
+                {diffState.status === "ready" && <LazyDiffViewer state="ready" patch={diffState.patch} />}
+                {diffState.status === "error" && (
+                  <LazyDiffViewer
+                    state="error"
+                    error={diffState.message}
+                    onRetry={() => setDiffRetryKey((current) => current + 1)}
+                  />
+                )}
               </div>
             )}
           </div>
@@ -1562,8 +1587,10 @@ export default function App() {
             sessions={sessions}
             installations={installations}
             generateExport={exportSessionHandoff}
-            onStart={(agentId, markdown) => { void createSession(agentId, markdown); }}
-            onCancel={() => setHandoffOpen(false)}
+            starting={handoffStarting}
+            onDirtyChange={setHandoffDirty}
+            onStart={startHandoffSession}
+            onCancel={requestCloseHandoff}
           />
         </div>
       )}

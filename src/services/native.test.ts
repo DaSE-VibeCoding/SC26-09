@@ -1,10 +1,42 @@
-import { describe, expect, it } from "vitest";
-import { exportSessionHandoff, openSession, spawnTerminal, writeTerminal, stopTerminal, isTauri } from "./native";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { confirmDiscard, exportSessionHandoff, openSession, spawnTerminal, writeTerminal, stopTerminal, isTauri } from "./native";
 import { SESSION_HOST_PROTOCOL_VERSION } from "../domain/sessionHost";
 
+const dialogMocks = vi.hoisted(() => ({
+  confirm: vi.fn(),
+  open: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => dialogMocks);
+
 describe("native terminal guards", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
   it("reports that Vitest runs outside the Tauri webview", () => {
     expect(isTauri()).toBe(false);
+  });
+
+  it("uses browser confirmation in preview and native confirmation in Tauri", async () => {
+    const browserConfirm = vi.fn(() => true);
+    vi.stubGlobal("window", { confirm: browserConfirm });
+
+    await expect(confirmDiscard("Discard preview changes?")).resolves.toBe(true);
+    expect(browserConfirm).toHaveBeenCalledWith("Discard preview changes?");
+    expect(dialogMocks.confirm).not.toHaveBeenCalled();
+
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    dialogMocks.confirm.mockResolvedValueOnce(false);
+
+    await expect(confirmDiscard("Discard native changes?")).resolves.toBe(false);
+    expect(dialogMocks.confirm).toHaveBeenCalledWith("Discard native changes?", {
+      title: "Pelican",
+      kind: "warning",
+      okLabel: "Discard",
+      cancelLabel: "Keep editing",
+    });
   });
 
   it("refuses to spawn a terminal outside Tauri instead of silently succeeding", async () => {
