@@ -1,7 +1,6 @@
 import type { SessionStatus } from "./models";
 
 export type SessionEvent =
-  | { type: "process-started" }
   | { type: "activity" }
   | { type: "attention-requested" }
   | { type: "turn-completed" }
@@ -14,8 +13,6 @@ export function reduceSessionStatus(
   event: SessionEvent,
 ): SessionStatus {
   switch (event.type) {
-    case "process-started":
-      return "working";
     case "activity":
       // Output repainting must not hide an unresolved approval or question.
       // Sending the user's response explicitly moves the session back to working.

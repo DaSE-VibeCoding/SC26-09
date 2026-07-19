@@ -5,6 +5,7 @@ import { AgentLogo } from "./components/AgentLogo";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
 import { Icon } from "./components/Icon";
 import { PelicanLogo } from "./components/PelicanLogo";
+import { PromptComposer } from "./components/PromptComposer";
 import { StatusDot } from "./components/StatusDot";
 import { TerminalView } from "./components/TerminalView";
 import type {
@@ -15,6 +16,21 @@ import type {
   SessionMode,
   Workspace,
 } from "./domain/models";
+import type { ActivityEvent } from "./domain/lifecycle";
+import {
+  createLiveTurnLifecycleFromSessionStatus,
+  selectTerminalOutputFallbackAction,
+  PTY_FALLBACK_ATTENTION_KEY,
+} from "./domain/sessionLifecycle";
+import {
+  createSessionRuntimeState,
+  reduceSessionRuntime,
+  type SessionRuntimeState,
+} from "./domain/sessionRuntime";
+import {
+  buildPromptSendRequests,
+  selectPromptAvailability,
+} from "./domain/sessionPrompt";
 import { reduceSessionStatus, scanTerminalAttention, TURN_IDLE_MS } from "./domain/status";
 import {
   chooseWorkspace,
@@ -23,21 +39,21 @@ import {
   getGitChanges,
   getGitDiff,
   isTauri,
+  listHostedSessions,
   listWorkspaceFiles,
-  listTerminalSessions,
-  onTerminalExit,
-  onTerminalOutput,
-  spawnTerminal,
-  stopTerminal,
-  writeTerminal,
+  onSessionEvent,
+  openSession,
+  sendSession,
+  stopSession as stopHostedSession,
 } from "./services/native";
+import { SESSION_HOST_PROTOCOL_VERSION, type SessionOpenRequest } from "./domain/sessionHost";
 import {
   loadSessions,
   loadWorkspaces,
   saveSessions,
   saveWorkspaces,
 } from "./services/storage";
-import { mergeDiscoveredSessions } from "./services/sessionDiscovery";
+import { mergeDiscoveredSessions, selectDiscoveryTerminalCleanupIds } from "./services/sessionDiscovery";
 import {
   enableNotifications,
   notificationsAreEnabled,
@@ -62,6 +78,10 @@ function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
 }
 
+function hostOpenRequest(session: AgentSession, workspacePath: string, executable: string, recovery: SessionOpenRequest["recovery"]): SessionOpenRequest {
+  return { protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId: session.id, agentId: session.agentId, workspacePath, title: session.title, transport: { type: "pty-fallback", executable }, terminalSize: { rows: 30, cols: 110 }, recovery };
+}
+
 function statusLabel(status: AgentSession["status"]): string {
   switch (status) {
     case "attention": return "Needs attention";
@@ -71,14 +91,6 @@ function statusLabel(status: AgentSession["status"]): string {
     case "available": return "Available";
     case "offline": return "Offline";
   }
-}
-
-function reviewSession(session: AgentSession): AgentSession {
-  return {
-    ...session,
-    unread: false,
-    status: reduceSessionStatus(session.status, { type: "reviewed", running: session.running }),
-  };
 }
 
 function previewState(): { workspaces: Workspace[]; sessions: AgentSession[] } {
@@ -107,6 +119,35 @@ const DIALOG_FOCUSABLE = [
   "[href]",
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
+
+const FALLBACK_TURN_STARTED_EVENT = {
+  type: "turn-started",
+  evidence: "fallback",
+} satisfies ActivityEvent;
+
+const FALLBACK_ATTENTION_REQUESTED_EVENT = {
+  type: "attention-requested",
+  evidence: "fallback",
+  key: PTY_FALLBACK_ATTENTION_KEY,
+} satisfies ActivityEvent;
+
+const FALLBACK_SUBMISSION_EVENTS = [
+  {
+    type: "attention-resolved",
+    evidence: "fallback",
+    key: PTY_FALLBACK_ATTENTION_KEY,
+  },
+  FALLBACK_TURN_STARTED_EVENT,
+] satisfies readonly ActivityEvent[];
+
+const FALLBACK_TURN_COMPLETED_EVENT = {
+  type: "turn-completed",
+  evidence: "fallback",
+} satisfies ActivityEvent;
+
+interface DiscoveryCleanupPlan {
+  readonly liveIds: readonly string[];
+}
 
 function useDialogFocus<T extends HTMLElement>(open: boolean) {
   const ref = useRef<T>(null);
@@ -153,11 +194,18 @@ function useDialogFocus<T extends HTMLElement>(open: boolean) {
 export default function App() {
   const preview = useMemo(() => (!isTauri() ? previewState() : null), []);
   const [workspaces, setWorkspaces] = useState<Workspace[]>(() => preview?.workspaces ?? loadWorkspaces());
-  const [sessions, setSessions] = useState<AgentSession[]>(() => (
+  const [sessionRuntime, setSessionRuntime] = useState(() => createSessionRuntimeState(
     (preview?.sessions ?? loadSessions()).filter((session) => (
       workspaces.some((workspace) => workspace.id === session.workspaceId)
-    ))
+    )),
   ));
+  const sessions = sessionRuntime.sessions as AgentSession[];
+  const setSessions = useCallback((update: (current: AgentSession[]) => AgentSession[]) => {
+    setSessionRuntime((current) => reduceSessionRuntime(current, {
+      type: "replace-sessions",
+      sessions: update(current.sessions as AgentSession[]),
+    }));
+  }, []);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(() => workspaces[0]?.id ?? null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(() => (
     sessions.find((session) => session.workspaceId === workspaces[0]?.id)?.id ?? null
@@ -175,6 +223,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentsLoading, setAgentsLoading] = useState(true);
   const [sessionsRefreshing, setSessionsRefreshing] = useState(false);
+  const [discoveryCleanupPlan, setDiscoveryCleanupPlan] = useState<DiscoveryCleanupPlan | null>(null);
   const [contextLoading, setContextLoading] = useState(false);
   const [contextRefreshing, setContextRefreshing] = useState(false);
   const [contextErrors, setContextErrors] = useState<{ files?: string; changes?: string }>({});
@@ -188,6 +237,7 @@ export default function App() {
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const workspacesRef = useRef(workspaces);
   const sessionsRef = useRef(sessions);
+  const committedSessionsForDiscoveryCleanupRef = useRef(sessions);
   const activeSessionIdRef = useRef(activeSessionId);
   const activeWorkspaceRef = useRef<Workspace | null>(null);
   const workspaceSessionsRef = useRef<AgentSession[]>([]);
@@ -207,11 +257,14 @@ export default function App() {
   const sessionDiscoveryInFlightRef = useRef(false);
   const createSessionInFlightRef = useRef(false);
   const discoveryErrorRef = useRef<string | null>(null);
+  const hostListenerReadyRef = useRef(false);
+  const refreshDiscoveredSessionsRef = useRef<(surfaceError?: boolean) => void | Promise<void>>(() => undefined);
   const statusFlushTimerRef = useRef<number | null>(null);
   const loadedWorkspaceIdRef = useRef<string | null>(null);
   const loadedDiffKeyRef = useRef<string | null>(null);
   const agentPickerRef = useDialogFocus<HTMLElement>(agentPickerOpen);
   const settingsRef = useDialogFocus<HTMLElement>(settingsOpen);
+  const connectionFor = (sessionId: string) => sessionRuntime.connectionBySessionId[sessionId];
 
   const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId) ?? null;
   const activeSession = sessions.find((session) => (
@@ -222,6 +275,8 @@ export default function App() {
   const activeSessionStarting = activeSession ? startingSessionIds.has(activeSession.id) : false;
   const activeSessionStopping = activeSession ? stoppingSessionIds.has(activeSession.id) : false;
   const activeSessionSending = activeSession ? sendingSessionIds.has(activeSession.id) : false;
+  const activeSessionConnection = activeSession ? connectionFor(activeSession.id) : undefined;
+  const activePromptAvailability = selectPromptAvailability(activeSession, activeSessionConnection);
   const activeSessionCanAttach = Boolean(
     activeSession && !activeSession.connected && activeSession.running && activeSession.attachHandle,
   );
@@ -239,6 +294,39 @@ export default function App() {
     if (!activeSessionId) return;
     setDrafts((current) => ({ ...current, [activeSessionId]: value }));
   }, [activeSessionId]);
+
+  const updateRuntimeSession = (
+    state: SessionRuntimeState,
+    sessionId: string,
+    update: (session: AgentSession) => AgentSession,
+  ): SessionRuntimeState => reduceSessionRuntime(state, {
+    type: "replace-sessions",
+    sessions: state.sessions.map((session) => session.id === sessionId ? update(session) : session),
+  });
+  const initializeRuntimeSession = (
+    state: SessionRuntimeState,
+    sessionId: string,
+    update: (session: AgentSession) => AgentSession,
+    mode: "fresh" | "reuse-existing" | "seed-from-status",
+  ) => reduceSessionRuntime(updateRuntimeSession(state, sessionId, update), { type: "initialize", sessionId, mode });
+
+  useEffect(() => {
+    const previousSessions = committedSessionsForDiscoveryCleanupRef.current;
+    committedSessionsForDiscoveryCleanupRef.current = sessions;
+    if (!discoveryCleanupPlan) return;
+
+    const cleanupIds = selectDiscoveryTerminalCleanupIds(
+      previousSessions,
+      sessions,
+      new Set(discoveryCleanupPlan.liveIds),
+    );
+    setDiscoveryCleanupPlan(null);
+    cleanupIds.forEach((sessionId) => {
+      const connection = connectionFor(sessionId);
+      if (connection) void stopHostedSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId, streamId: connection.streamId }).catch(() => undefined);
+      clearTerminalBuffer(sessionId);
+    });
+  }, [discoveryCleanupPlan, sessions]);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -304,71 +392,41 @@ export default function App() {
         if (!cancelled) setAgentsLoading(false);
       });
     // Rejoin Pelican-owned PTYs that survived a webview reload (Rust host still live).
-    void listTerminalSessions()
-      .then((liveIds) => {
-        if (cancelled || liveIds.length === 0) return;
-        const live = new Set(liveIds);
-        liveIds.forEach((sessionId) => initializeTerminalBuffer(sessionId));
-        setSessions((current) => current.map((session) => (
-          live.has(session.id)
-            ? {
-                ...session,
-                connected: true,
-                running: true,
-                status: session.status === "available" || session.status === "offline"
-                  ? "idle"
-                  : session.status,
-              }
-            : session
-        )));
-      })
-      .catch(() => undefined);
     return () => { cancelled = true; };
   }, []);
 
   const refreshDiscoveredSessions = useCallback(async (surfaceError = true) => {
-    if (!isTauri() || workspaces.length === 0 || sessionDiscoveryInFlightRef.current) return;
+    if (!isTauri() || !hostListenerReadyRef.current || workspaces.length === 0 || sessionDiscoveryInFlightRef.current) return;
     sessionDiscoveryInFlightRef.current = true;
     setSessionsRefreshing(true);
     try {
-      const [discovered, liveIds] = await Promise.all([
+      const [discovered, hosted] = await Promise.all([
         discoverAgentSessions(workspaces.map((workspace) => workspace.path)),
-        listTerminalSessions().catch(() => [] as string[]),
+        listHostedSessions().catch(() => []),
       ]);
-      setSessions((current) => {
-        const live = new Set(liveIds);
-        if (live.size > 0) {
-          liveIds.forEach((sessionId) => initializeTerminalBuffer(sessionId));
-        }
-        const reconnected = live.size === 0
-          ? current
-          : current.map((session) => (
-            live.has(session.id)
-              ? {
-                  ...session,
-                  connected: true,
-                  running: true,
-                  status: session.status === "available" || session.status === "offline"
-                    ? "idle"
-                    : session.status,
-                }
-              : session
-          ));
+      const liveIds = hosted.map((snapshot) => snapshot.sessionId);
+      const now = new Date().toISOString();
+      const allocatedSessionIds = discovered.map(() => createId());
+      liveIds.forEach((sessionId) => initializeTerminalBuffer(sessionId));
+      setSessionRuntime((current) => {
+        let allocatedSessionIdIndex = 0;
+        const nextDiscoveredSessionId = () => {
+          const id = allocatedSessionIds[allocatedSessionIdIndex];
+          if (id === undefined) throw new Error("Not enough preallocated discovery session IDs");
+          allocatedSessionIdIndex += 1;
+          return id;
+        };
+        const reconnectedState = hosted.reduce((next, snapshot) => reduceSessionRuntime(next, { type: "host-snapshot", snapshot }), current);
         const merged = mergeDiscoveredSessions(
-          reconnected,
+          reconnectedState.sessions as AgentSession[],
           discovered,
           workspaces,
-          createId,
+          nextDiscoveredSessionId,
+          now,
         );
-        const mergedIds = new Set(merged.map((session) => session.id));
-        for (const session of current) {
-          if (session.connected && !mergedIds.has(session.id) && !live.has(session.id)) {
-            void stopTerminal(session.id).catch(() => undefined);
-            clearTerminalBuffer(session.id);
-          }
-        }
-        return merged;
+        return reduceSessionRuntime(reconnectedState, { type: "replace-sessions", sessions: merged });
       });
+      setDiscoveryCleanupPlan({ liveIds });
       discoveryErrorRef.current = null;
     } catch (reason) {
       const message = errorMessage(reason);
@@ -381,6 +439,7 @@ export default function App() {
       setSessionsRefreshing(false);
     }
   }, [workspaces]);
+  refreshDiscoveredSessionsRef.current = refreshDiscoveredSessions;
 
   useEffect(() => {
     if (!isTauri() || workspaces.length === 0) return;
@@ -499,7 +558,31 @@ export default function App() {
     let cancelled = false;
     const disposers: Array<() => void> = [];
     void Promise.all([
-      onTerminalOutput((event) => {
+      onSessionEvent((envelope) => {
+        setSessionRuntime((current) => reduceSessionRuntime(current, { type: "host-event", envelope }));
+        if (envelope.event.type !== "terminal-output" && envelope.event.type !== "closed") return;
+        if (envelope.event.type === "closed") {
+          const exitEvent = envelope.event;
+          const event = { sessionId: envelope.sessionId, success: exitEvent.outcome.type === "stopped" ? false : exitEvent.outcome.success };
+          exitedSessionIdsRef.current.add(event.sessionId);
+          engagedSessionIdsRef.current.delete(event.sessionId);
+          agentOutputSeenRef.current.delete(event.sessionId);
+          const idleTimer = turnIdleTimersRef.current[event.sessionId];
+          if (idleTimer !== undefined) { window.clearTimeout(idleTimer); delete turnIdleTimersRef.current[event.sessionId]; }
+          const intentionallyStopped = stoppingSessionIdsRef.current.delete(event.sessionId) || exitEvent.outcome.type === "stopped";
+          const endedSession = sessionsRef.current.find((session) => session.id === event.sessionId);
+          notifiedAttentionRef.current.delete(event.sessionId);
+          setStoppingSessionIds((current) => { const next = new Set(current); next.delete(event.sessionId); return next; });
+          const unread = !intentionallyStopped && (event.sessionId !== activeSessionIdRef.current || document.visibilityState !== "visible" || !document.hasFocus());
+          const lastActivityAt = new Date().toISOString();
+          setSessionRuntime((current) => updateRuntimeSession(current, event.sessionId, (session) => ({ ...session, unread, lastActivityAt })));
+          if (!intentionallyStopped && endedSession && notificationsEnabledRef.current && (activeSessionIdRef.current !== event.sessionId || !document.hasFocus())) {
+            const agentName = getAgentAdapter(endedSession.agentId).displayName;
+            void notify(`${agentName} ${event.success ? "finished" : "exited with an error"}`, endedSession.title).catch(() => undefined);
+          }
+          return;
+        }
+        const event = { sessionId: envelope.sessionId, data: envelope.event.data };
         appendTerminalBuffer(event.sessionId, event.data);
         const attentionScan = scanTerminalAttention(attentionScanRef.current[event.sessionId] ?? "", event.data);
         const needsAttention = attentionScan.needsAttention;
@@ -518,14 +601,14 @@ export default function App() {
             if (exitedSessionIdsRef.current.has(event.sessionId)) return;
             engagedSessionIdsRef.current.delete(event.sessionId);
             agentOutputSeenRef.current.delete(event.sessionId);
-            setSessions((current) => current.map((session) => session.id === event.sessionId
-              ? {
-                  ...session,
-                  status: reduceSessionStatus(session.status, { type: "turn-completed" }),
-                  unread: session.id !== activeSessionIdRef.current,
-                  lastActivityAt: new Date().toISOString(),
-                }
-              : session));
+            const lastActivityAt = new Date().toISOString();
+            const unread = event.sessionId !== activeSessionIdRef.current;
+            setSessionRuntime((current) => reduceSessionRuntime(current, {
+              type: "activity",
+              sessionId: event.sessionId,
+              events: [FALLBACK_TURN_COMPLETED_EVENT],
+              patch: { unread, lastActivityAt },
+            }));
           }, TURN_IDLE_MS);
         }
 
@@ -553,68 +636,34 @@ export default function App() {
             pendingActivityRef.current = new Set();
             pendingAttentionRef.current = {};
             statusFlushTimerRef.current = null;
-            setSessions((current) => current.map((session) => {
-              if (!pendingActivity.has(session.id) || exitedSessionIdsRef.current.has(session.id)) return session;
+            const lastActivityAt = new Date().toISOString();
+            const activeSessionId = activeSessionIdRef.current;
+            setSessionRuntime((current) => current.sessions.reduce((next, session) => {
+              if (!pendingActivity.has(session.id) || exitedSessionIdsRef.current.has(session.id)) return next;
               const requestedAttention = pendingAttention[session.id] ?? false;
-              const hasStartedWork = engagedSessionIdsRef.current.has(session.id);
-              return {
-                ...session,
-                status: requestedAttention
-                  ? reduceSessionStatus(session.status, { type: "attention-requested" })
-                  : hasStartedWork
-                    ? reduceSessionStatus(session.status, { type: "activity" })
-                    : session.status,
-                lastActivityAt: new Date().toISOString(),
-                unread: requestedAttention
-                  || (hasStartedWork && session.id !== activeSessionIdRef.current),
-              };
-            }));
+              const lifecycle = next.lifecycleBySessionId[session.id]
+                ?? createLiveTurnLifecycleFromSessionStatus(session.status);
+              const fallbackAction = selectTerminalOutputFallbackAction(lifecycle, {
+                currentStatus: session.status,
+                requestedAttention,
+                hasStartedWork: engagedSessionIdsRef.current.has(session.id),
+              });
+              const events = fallbackAction === "request-attention"
+                ? [FALLBACK_ATTENTION_REQUESTED_EVENT]
+                : fallbackAction === "start-turn" ? [FALLBACK_TURN_STARTED_EVENT] : [];
+              return reduceSessionRuntime(next, {
+                type: "activity", sessionId: session.id, events,
+                patch: {
+                  lastActivityAt,
+                  unread: fallbackAction === "request-attention"
+                    ? true
+                    : fallbackAction === "start-turn"
+                      ? session.id !== activeSessionId
+                      : session.unread,
+                },
+              });
+            }, current));
           }, 160);
-        }
-      }),
-      onTerminalExit((event) => {
-        exitedSessionIdsRef.current.add(event.sessionId);
-        engagedSessionIdsRef.current.delete(event.sessionId);
-        agentOutputSeenRef.current.delete(event.sessionId);
-        const idleTimer = turnIdleTimersRef.current[event.sessionId];
-        if (idleTimer !== undefined) {
-          window.clearTimeout(idleTimer);
-          delete turnIdleTimersRef.current[event.sessionId];
-        }
-        const intentionallyStopped = stoppingSessionIdsRef.current.delete(event.sessionId);
-        const endedSession = sessionsRef.current.find((session) => session.id === event.sessionId);
-        notifiedAttentionRef.current.delete(event.sessionId);
-        setStoppingSessionIds((current) => {
-          if (!current.has(event.sessionId)) return current;
-          const next = new Set(current);
-          next.delete(event.sessionId);
-          return next;
-        });
-        setSessions((current) => current.map((session) => session.id === event.sessionId
-          ? {
-              ...session,
-              status: intentionallyStopped
-                ? session.resumeHandle ? "available" : reduceSessionStatus(session.status, { type: "disconnected" })
-                : reduceSessionStatus(session.status, { type: "process-exited", success: event.success }),
-              connected: false,
-              running: false,
-              unread: intentionallyStopped
-                ? false
-                : session.id !== activeSessionIdRef.current
-                  || document.visibilityState !== "visible"
-                  || !document.hasFocus(),
-              lastActivityAt: new Date().toISOString(),
-            }
-          : session));
-        if (
-          !intentionallyStopped
-          && endedSession
-          && notificationsEnabledRef.current
-          && (activeSessionIdRef.current !== event.sessionId || !document.hasFocus())
-        ) {
-          const agentName = getAgentAdapter(endedSession.agentId).displayName;
-          const outcome = event.success ? "finished" : "exited with an error";
-          void notify(`${agentName} ${outcome}`, endedSession.title).catch(() => undefined);
         }
       }),
     ]).then((nextDisposers) => {
@@ -622,12 +671,15 @@ export default function App() {
         nextDisposers.forEach((dispose) => dispose());
       } else {
         disposers.push(...nextDisposers);
+        hostListenerReadyRef.current = true;
+        void refreshDiscoveredSessionsRef.current(true);
       }
     }).catch((reason: unknown) => {
       if (!cancelled) setError(`Could not monitor terminal sessions: ${errorMessage(reason)}`);
     });
     return () => {
       cancelled = true;
+      hostListenerReadyRef.current = false;
       disposers.forEach((dispose) => dispose());
       if (statusFlushTimerRef.current !== null) {
         window.clearTimeout(statusFlushTimerRef.current);
@@ -646,9 +698,7 @@ export default function App() {
         setActiveWorkspaceId(existing.id);
         setActiveSessionId(firstSession?.id ?? null);
         if (firstSession) {
-          setSessions((current) => current.map((session) => session.id === firstSession.id
-            ? reviewSession(session)
-            : session));
+          setSessionRuntime((current) => reduceSessionRuntime(current, { type: "review", sessionId: firstSession.id }));
         }
         return;
       }
@@ -671,9 +721,7 @@ export default function App() {
     if (!session) return;
     setActiveWorkspaceId(session.workspaceId);
     setActiveSessionId(sessionId);
-    setSessions((current) => current.map((candidate) => candidate.id === sessionId
-      ? reviewSession(candidate)
-      : candidate));
+    setSessionRuntime((current) => reduceSessionRuntime(current, { type: "review", sessionId }));
   }, []);
 
   const createSession = useCallback(async (agentId: FirstClassAgentId) => {
@@ -723,18 +771,8 @@ export default function App() {
       setMode("prompt");
 
       try {
-        await spawnTerminal({
-          sessionId: id,
-          cwd: activeWorkspace.path,
-          program: launch.program,
-          args: launch.args,
-          env: launch.env,
-          rows: 30,
-          cols: 110,
-        });
-        setSessions((current) => current.map((candidate) => candidate.id === id && !exitedSessionIdsRef.current.has(id)
-          ? { ...candidate, connected: true, running: true }
-          : candidate));
+        const snapshot = await openSession(hostOpenRequest(session, activeWorkspace.path, launch.program, { type: "new" }), launch);
+        setSessionRuntime((current) => reduceSessionRuntime(current, { type: "host-snapshot", snapshot }));
         queueMicrotask(() => promptRef.current?.focus());
       } catch (reason) {
         setSessions((current) => current.filter((candidate) => candidate.id !== id));
@@ -791,42 +829,34 @@ export default function App() {
     setMode("terminal");
 
     try {
-      await spawnTerminal({
-        sessionId: target.id,
-        cwd: workspace.path,
-        program: launch.program,
-        args: launch.args,
-        env: launch.env,
-        rows: 30,
-        cols: 110,
-      });
-      setSessions((current) => current.map((session) => session.id === target.id
-        ? {
-            ...session,
-            connected: true,
-            running: true,
-            status: attachSessionId ? session.status : "idle",
-            unread: false,
-          }
-        : session));
+      const recovery: SessionOpenRequest["recovery"] = attachSessionId ? { type: "attach", handle: attachSessionId } : { type: "resume", handle: resumeSessionId! };
+      const snapshot = await openSession(hostOpenRequest(target, workspace.path, launch.program, recovery), launch);
+      setSessionRuntime((current) => reduceSessionRuntime(current, { type: "host-snapshot", snapshot }));
     } catch (reason) {
       const message = errorMessage(reason);
       // Webview reload leaves the Rust PTY alive; treat "already exists" as reconnect.
       if (/already exists/i.test(message)) {
-        initializeTerminalBuffer(target.id);
-        setSessions((current) => current.map((session) => session.id === target.id
-          ? {
-              ...session,
-              connected: true,
-              running: true,
-              status: session.status === "available" || session.status === "offline" ? "idle" : session.status,
-              unread: false,
-            }
-          : session));
+        const snapshot = await listHostedSessions()
+          .then((hosted) => hosted.find((candidate) => candidate.sessionId === target.id))
+          .catch(() => undefined);
+        if (snapshot) {
+          initializeTerminalBuffer(target.id);
+          setSessionRuntime((current) => reduceSessionRuntime(
+            updateRuntimeSession(current, target.id, (session) => ({ ...session, unread: false })),
+            { type: "host-snapshot", snapshot },
+          ));
+        } else {
+          setSessionRuntime((current) => reduceSessionRuntime(
+            updateRuntimeSession(current, target.id, () => previous),
+            { type: "clear-lifecycle", sessionId: target.id },
+          ));
+          setError(`Could not reconnect to ${adapter.displayName}: the existing session stream is unavailable.`);
+        }
       } else {
-        setSessions((current) => current.map((session) => session.id === target.id
-          ? previous
-          : session));
+        setSessionRuntime((current) => reduceSessionRuntime(
+          updateRuntimeSession(current, target.id, () => previous),
+          { type: "clear-lifecycle", sessionId: target.id },
+        ));
         setError(`Could not ${attachSessionId ? "attach to" : "resume"} ${adapter.displayName}: ${message}`);
       }
     } finally {
@@ -842,55 +872,60 @@ export default function App() {
   const sendPrompt = useCallback(async () => {
     if (!activeSession || !prompt.trim()) return;
     const sessionId = activeSession.id;
+    const connection = connectionFor(sessionId);
+    const availability = selectPromptAvailability(activeSession, connection);
+    if (!availability.canSend) {
+      setError(availability.message);
+      return;
+    }
     if (sendingSessionIdsRef.current.has(sessionId)) return;
     if (stoppingSessionIdsRef.current.has(sessionId)) return;
-    if (!activeSession.connected) {
-      setError("Connect or resume this session before sending a prompt.");
+    const requests = buildPromptSendRequests(activeSession, connection, prompt);
+    if (requests.length === 0) {
+      setError(availability.message);
       return;
     }
 
     // Trim so a trailing Enter in the composer does not force bracketed-paste
     // mode, which leaves Codex waiting for a manual terminal Enter to submit.
     const submittedPrompt = prompt.trim();
-    const multiline = submittedPrompt.includes("\n");
-    const data = multiline
-      ? `\x1b[200~${submittedPrompt}\x1b[201~\r`
-      : `${submittedPrompt}\r`;
     sendingSessionIdsRef.current.add(sessionId);
     setSendingSessionIds((current) => new Set(current).add(sessionId));
     setDrafts((current) => current[sessionId] === prompt
       ? { ...current, [sessionId]: "" }
       : current);
     try {
-      if (activeSession.agentId === "codex") {
-        // Write the line and the Enter separately. A single bulk `text\r` often
-        // lands in Codex's composer without submitting until a later Enter.
-        await writeTerminal(
-          sessionId,
-          multiline ? `\x1b[200~${submittedPrompt}\x1b[201~` : submittedPrompt,
-        );
-        await writeTerminal(sessionId, "\r");
-      } else {
-        await writeTerminal(sessionId, data);
+      for (const request of requests) await sendSession(request);
+      if (availability.authority === "pty-fallback") {
+        engagedSessionIdsRef.current.add(sessionId);
+        agentOutputSeenRef.current.delete(sessionId);
+        const idleTimer = turnIdleTimersRef.current[sessionId];
+        if (idleTimer !== undefined) {
+          window.clearTimeout(idleTimer);
+          delete turnIdleTimersRef.current[sessionId];
+        }
+        attentionScanRef.current[sessionId] = "";
+        notifiedAttentionRef.current.delete(sessionId);
+        pendingActivityRef.current.delete(sessionId);
+        delete pendingAttentionRef.current[sessionId];
+        setSessionRuntime((current) => (
+          exitedSessionIdsRef.current.has(sessionId) || stoppingSessionIdsRef.current.has(sessionId)
+            ? current
+            : (() => {
+              const currentSession = current.sessions.find((session) => session.id === sessionId);
+              if (!currentSession) return current;
+              return reduceSessionRuntime(current, {
+                type: "activity", sessionId, events: FALLBACK_SUBMISSION_EVENTS,
+                patch: {
+                  unread: false,
+                  title: currentSession.title.startsWith("New ")
+                    ? submittedPrompt.slice(0, 96)
+                    : currentSession.title,
+                },
+              });
+            })()
+        ));
       }
-      engagedSessionIdsRef.current.add(sessionId);
-      agentOutputSeenRef.current.delete(sessionId);
-      const idleTimer = turnIdleTimersRef.current[sessionId];
-      if (idleTimer !== undefined) {
-        window.clearTimeout(idleTimer);
-        delete turnIdleTimersRef.current[sessionId];
-      }
-      attentionScanRef.current[sessionId] = "";
-      notifiedAttentionRef.current.delete(sessionId);
-      pendingActivityRef.current.delete(sessionId);
-      delete pendingAttentionRef.current[sessionId];
-      setSessions((current) => current.map((session) => (
-        session.id === sessionId
-        && !exitedSessionIdsRef.current.has(sessionId)
-        && !stoppingSessionIdsRef.current.has(sessionId)
-      )
-        ? { ...session, status: "working", unread: false, title: session.title.startsWith("New ") ? submittedPrompt.slice(0, 96) : session.title }
-        : session));
     } catch (reason) {
       setDrafts((current) => current[sessionId]
         ? current
@@ -904,23 +939,23 @@ export default function App() {
         return next;
       });
     }
-  }, [activeSession, mode, prompt]);
+  }, [activeSession, sessionRuntime.connectionBySessionId, prompt]);
 
   const stopSession = useCallback(async () => {
     if (!activeSession?.connected || stoppingSessionIdsRef.current.has(activeSession.id)) return;
     stoppingSessionIdsRef.current.add(activeSession.id);
     setStoppingSessionIds((current) => new Set(current).add(activeSession.id));
     try {
-      await stopTerminal(activeSession.id);
-      setSessions((current) => current.map((session) => session.id === activeSession.id
-        ? {
-            ...session,
-            connected: false,
-            running: false,
-            status: session.resumeHandle ? "available" : "offline",
-            unread: false,
-          }
-        : session));
+      const streamId = connectionFor(activeSession.id)?.streamId;
+      if (!streamId) throw new Error("Session stream is unavailable");
+      await stopHostedSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId: activeSession.id, streamId });
+      setSessionRuntime((current) => reduceSessionRuntime(
+        updateRuntimeSession(current, activeSession.id, (session) => ({
+          ...session, connected: false, running: false,
+          status: session.resumeHandle ? "available" : "offline", unread: false,
+        })),
+        { type: "clear-lifecycle", sessionId: activeSession.id },
+      ));
     } catch (reason) {
       stoppingSessionIdsRef.current.delete(activeSession.id);
       setStoppingSessionIds((current) => {
@@ -941,7 +976,7 @@ export default function App() {
     const nextSession = sessionsRef.current.find((session) => (
       session.workspaceId === target.workspaceId && session.id !== sessionId
     ));
-    setSessions((current) => current.filter((session) => session.id !== sessionId));
+    setSessionRuntime((current) => reduceSessionRuntime(current, { type: "remove", sessionId }));
     setDrafts((current) => {
       const next = { ...current };
       delete next[sessionId];
@@ -967,9 +1002,11 @@ export default function App() {
     notifiedAttentionRef.current.delete(sessionId);
     pendingActivityRef.current.delete(sessionId);
     delete pendingAttentionRef.current[sessionId];
-    setSessions((current) => current.map((session) => session.id === sessionId
-      ? { ...session, status: "working", unread: false, lastActivityAt: new Date().toISOString() }
-      : session));
+    const lastActivityAt = new Date().toISOString();
+    setSessionRuntime((current) => reduceSessionRuntime(current, {
+      type: "activity", sessionId, events: FALLBACK_SUBMISSION_EVENTS,
+      patch: { unread: false, lastActivityAt },
+    }));
   }, []);
 
   const requestNotifications = useCallback(async () => {
@@ -1207,6 +1244,7 @@ export default function App() {
               {activeSession.connected && (
                 <TerminalView
                   sessionId={activeSession.id}
+                  streamId={connectionFor(activeSession.id)?.streamId ?? ""}
                   visible={mode === "terminal"}
                   interactive={mode === "terminal" && !activeSessionStarting && !activeSessionStopping}
                   onInput={handleTerminalInput}
@@ -1306,26 +1344,17 @@ export default function App() {
                       </span>
                     </div>
                   ) : (
-                    <div className="composer">
-                      <textarea
-                        ref={promptRef}
-                        value={prompt}
-                        onChange={(event) => setPrompt(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter" && event.metaKey) {
-                            event.preventDefault();
-                            void sendPrompt();
-                          }
-                        }}
-                        placeholder={activeSession.status === "attention"
-                          ? `Reply to ${getAgentAdapter(activeSession.agentId).displayName}…`
-                          : `Give ${getAgentAdapter(activeSession.agentId).displayName} a task…`}
-                      />
-                      <div className="composer-footer">
-                        <span>⌘Enter to send · Enter for newline</span>
-                        <button type="button" onClick={() => void sendPrompt()} disabled={!prompt.trim() || activeSessionSending}>{activeSessionSending ? "Sending…" : "Send"}</button>
-                      </div>
-                    </div>
+                    <PromptComposer
+                      ref={promptRef}
+                      value={prompt}
+                      agentName={getAgentAdapter(activeSession.agentId).displayName}
+                      attention={activeSession.status === "attention"}
+                      sending={activeSessionSending}
+                      blocked={!activePromptAvailability.canSend}
+                      readinessMessage={activePromptAvailability.message}
+                      onChange={setPrompt}
+                      onSend={() => void sendPrompt()}
+                    />
                   )}
                 </div>
               )}

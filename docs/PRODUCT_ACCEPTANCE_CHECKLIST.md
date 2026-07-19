@@ -23,8 +23,8 @@ Do not mark **unified real-time agent management** complete until the golden wor
 | Real-time idle/running/waiting/completed status | Missing at product level | Current PTY heuristics can show startup, activity, attention text, and process exit. Structured Codex turn events, Claude hooks, and Pi RPC events are not wired, so normal completed turns can remain `Working`. |
 | Left sidebar organizes workspaces, agents, sessions | Partial | Workspaces and sessions have agent logos, status text, unread state, and shortcuts. There is no independent collapse, grouping/filtering, global attention inbox, rename, archive, or pinning. |
 | Right sidebar shows files and Git context | Substantially implemented | File list, modified files, staged/unstaged/untracked diffs, refresh, empty, and error states exist. Folder interaction, file open/search, non-Git labeling, and richer diff feedback remain. |
-| Friendly command interface | Partial | The composer sends text to the connected PTY and preserves drafts. It has no conversation transcript, tool progress, approvals, structured streaming, readiness handshake, or turn-level interrupt. |
-| Integrated terminal and direct control | Implemented for Pelican-owned PTYs | PTY spawn, input, resize, stop, replay, and bounded buffering work. External Codex/Pi foreground terminals cannot be reattached at the OS PTY level. |
+| Friendly command interface | Partial | The composer sends text to the connected PTY, preserves drafts, and has fixture-verified readiness gating/copy. It has no conversation transcript, tool progress, approvals, structured streaming, real readiness handshake producer, or turn-level interrupt. |
+| Integrated terminal and direct control | Implemented for Pelican-owned PTYs | The in-process SessionHost owns PTY spawn, stream-scoped input/resize/stop, ordered events, and bounded UI buffering. External Codex/Pi foreground terminals cannot be reattached at the OS PTY level. |
 | Native notifications | Partial | Permission UI and focus-aware attention/process-exit notifications exist. Normal task completion is not known reliably while an interactive CLI remains open. |
 | Keyboard-first operation | Partial | Command palette and core shortcuts exist. Complete panel navigation, lifecycle actions, file-tree navigation, customization, and accessibility validation are missing. |
 
@@ -51,6 +51,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 | Resume saved history | `codex resume`, implemented path | `--resume`, implemented path | `--session <absolute path>`, implemented path |
 | Attach a live external session | Not for arbitrary TUI | Background `claude attach` only | Not for arbitrary TUI |
 | Authoritative live lifecycle | Missing | Missing | Missing |
+| Authoritative prompt readiness producer | Missing | Missing | Missing |
 | Target structured transport | Long-lived app-server | Lifecycle hooks/background inventory | RPC or extension events |
 
 ## Implementation checklist by workflow
@@ -61,7 +62,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 - [x] Codex, Claude Code, and Pi executable discovery uses absolute executables and no shell-concatenated user input.
 - [x] Agent picker shows detecting, available, and missing states.
 - [ ] PARTIAL — Probe CLI versions and capabilities, with an explicit compatibility/fallback message.
-- [ ] MISSING — Handle authentication/setup screens as a first-class state instead of inferring work from startup output.
+- [ ] PARTIAL — Handle authentication/setup screens as a first-class state instead of inferring work from startup output. CAP-01A defines blocked auth/setup readiness fixture states and copy, but no runtime producer detects them.
 - [ ] MISSING — Verify the signed packaged app outside a development shell and GUI `PATH` variants.
 
 ### Workspace management
@@ -96,7 +97,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 - [x] A fresh welcome TUI begins `Idle`, not `Working`.
 - [x] Prevent duplicate resume/attach clicks with an immediate in-flight lock.
 - [x] Prevent duplicate new-session launches before React rerenders.
-- [ ] MISSING — Wait for an agent-ready handshake before enabling prompt submission.
+- [ ] MISSING — Wait for an agent-ready handshake before enabling prompt submission. CAP-01A adds fixture policy/readiness copy only; fallback PTY remains sendable and no provider readiness producer exists.
 - [ ] PARTIAL — Reconcile every new session with its provider ID and saved resume handle.
 
 ### Resume and attach
@@ -115,7 +116,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 - [x] Block empty or duplicate sends and display `Sending…`.
 - [x] Use bracketed paste for multiline input and restore the draft on write failure.
 - [x] Refuse sending while disconnected and offer Resume/Attach where supported.
-- [ ] PARTIAL — A successful send currently means “bytes reached the PTY,” not “the provider accepted a turn.”
+- [ ] PARTIAL — A successful fallback send currently means “bytes reached the PTY,” not “the provider accepted a turn.” CAP-01A blocks structured fixtures until authoritative ready, but no production readiness producer exists.
 - [ ] MISSING — Conversation history, streamed responses, tool activity, approvals, progress, and usage.
 - [ ] MISSING — Interrupt a turn without killing the whole CLI process.
 - [ ] MISSING — Prompt history, attachments/context selection, and command help.
@@ -196,7 +197,7 @@ Every interactive component must provide all applicable feedback states.
 | Agent picker | Detecting CLI | Installed agent enabled | All agents missing guidance | Start failure with retry | Missing provider disabled with reason |
 | Session row | Launching/stopping | Logo, text status, unread | Available/offline | Attention/failure state | Accessible selected/unread/source labels |
 | Resume/attach card | Resuming/attaching | Connected PTY | Saved/external/offline copy | Restore state and retry | One in-flight action only |
-| Prompt composer | Sending | Draft cleared after write | Disabled while disconnected | Exact draft restored | Explicit textarea label/readiness |
+| Prompt composer | Sending | Draft cleared after allowed fallback write | Disabled while disconnected or readiness-blocked | Exact draft restored | Explicit textarea label plus `role=status` readiness copy; textarea remains editable |
 | Terminal | Starting/stopping | Same live PTY | Honest recovery screen | Input/resize/reconnect feedback | Inert when hidden; screen-reader plan |
 | File tree | Initial/refresh | Sorted bounded tree | No files | Local error and retry | Tree semantics and keyboard traversal |
 | Git changes/diff | Status/diff loading | Selected change and diff | Clean/non-Git/binary | Local error and retry | Accessible selection and status code |
@@ -256,8 +257,8 @@ The product's real-time-status promise remains **not accepted** while the “tur
 
 - [x] TypeScript typecheck passes.
 - [x] Frontend production build passes.
-- [x] 23 frontend unit tests pass.
-- [x] 22 Rust unit tests pass.
+- [x] 136 frontend unit tests pass.
+- [x] 28 Rust unit tests pass.
 - [x] Rust formatting passes.
 - [x] Rust Clippy with warnings denied passes.
 - [x] Browser smoke test covers disconnected, available, Resume, and connected-terminal feedback.

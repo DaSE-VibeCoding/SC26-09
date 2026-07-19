@@ -9,6 +9,9 @@ import type {
   TerminalExitEvent,
   TerminalOutputEvent,
 } from "../domain/models";
+import type { HostedSessionSnapshot, SessionEventEnvelope, SessionOpenRequest, SessionResizeRequest, SessionSendRequest, SessionStopRequest } from "../domain/sessionHost";
+import { decodeHostedSessionSnapshot, decodeSessionEventEnvelope } from "./sessionHostCodec";
+import type { AgentLaunchSpec } from "../agents/types";
 
 /** True only inside the native Pelican webview — never in a plain browser tab. */
 export const isTauri = (): boolean => {
@@ -59,6 +62,21 @@ export async function discoverAgentSessions(
 export async function spawnTerminal(request: SpawnTerminalRequest): Promise<void> {
   requireTauri("Starting an agent terminal");
   await invoke("terminal_spawn", { request });
+}
+
+export async function openSession(request: SessionOpenRequest, launch: AgentLaunchSpec): Promise<HostedSessionSnapshot> {
+  if (launch.program !== request.transport.executable) throw new Error("Prepared launch executable does not match the session request");
+  requireTauri("Starting an agent session");
+  const value = await invoke("session_open", { command: { request, ptyLaunch: { args: launch.args, env: launch.env } } });
+  return decodeHostedSessionSnapshot(value);
+}
+export async function sendSession(request: SessionSendRequest): Promise<void> { requireTauri("Writing to an agent session"); await invoke("session_send", { request }); }
+export async function resizeSession(request: SessionResizeRequest): Promise<void> { if (!isTauri()) return; await invoke("session_resize", { request }); }
+export async function stopSession(request: SessionStopRequest): Promise<void> { requireTauri("Stopping an agent session"); await invoke("session_stop", { request }); }
+export async function listHostedSessions(): Promise<HostedSessionSnapshot[]> { if (!isTauri()) return []; return (await invoke<unknown[]>("session_list")).map(decodeHostedSessionSnapshot); }
+export async function onSessionEvent(callback: (event: SessionEventEnvelope) => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<unknown>("session-event", ({ payload }) => callback(decodeSessionEventEnvelope(payload)));
 }
 
 export async function writeTerminal(sessionId: string, data: string): Promise<void> {

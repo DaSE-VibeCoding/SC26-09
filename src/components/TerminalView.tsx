@@ -3,13 +3,15 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import {
   isTauri,
-  resizeTerminal,
-  writeTerminal,
+  resizeSession,
+  sendSession,
 } from "../services/native";
+import { SESSION_HOST_PROTOCOL_VERSION } from "../domain/sessionHost";
 import { useTerminalBuffer } from "../services/terminalBuffer";
 
 interface TerminalViewProps {
   sessionId: string;
+  streamId: string;
   visible: boolean;
   interactive: boolean;
   onInput(sessionId: string, data: string): void;
@@ -22,6 +24,7 @@ function errorMessage(reason: unknown): string {
 
 export function TerminalView({
   sessionId,
+  streamId,
   visible,
   interactive,
   onInput,
@@ -93,7 +96,7 @@ export function TerminalView({
 
     const inputDisposable = terminal.onData((data) => {
       if (!interactiveRef.current) return;
-      void writeTerminal(sessionId, data)
+      void sendSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId, streamId, input: { type: "terminal", data } })
         .then(() => onInputRef.current(sessionId, data))
         .catch((reason: unknown) => {
           onErrorRef.current(errorMessage(reason));
@@ -103,7 +106,7 @@ export function TerminalView({
     const resizeObserver = new ResizeObserver(() => {
       fit.fit();
       if (interactiveRef.current) {
-        void resizeTerminal(sessionId, terminal.rows, terminal.cols).catch(() => undefined);
+        void resizeSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId, streamId, rows: terminal.rows, cols: terminal.cols }).catch(() => undefined);
       }
     });
     resizeObserver.observe(hostRef.current);
@@ -116,7 +119,7 @@ export function TerminalView({
       terminalRef.current = null;
       fitRef.current = null;
     };
-  }, [sessionId]);
+  }, [sessionId, streamId]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -146,9 +149,9 @@ export function TerminalView({
     }
     queueMicrotask(() => {
       fitRef.current?.fit();
-      void resizeTerminal(sessionId, terminal.rows, terminal.cols).catch(() => undefined);
+      void resizeSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId, streamId, rows: terminal.rows, cols: terminal.cols }).catch(() => undefined);
     });
-  }, [interactive, sessionId]);
+  }, [interactive, sessionId, streamId]);
 
   useEffect(() => {
     if (visible) {
@@ -157,12 +160,12 @@ export function TerminalView({
         if (!terminal) return;
         fitRef.current?.fit();
         if (interactiveRef.current) {
-          void resizeTerminal(sessionId, terminal.rows, terminal.cols).catch(() => undefined);
+          void resizeSession({ protocolVersion: SESSION_HOST_PROTOCOL_VERSION, sessionId, streamId, rows: terminal.rows, cols: terminal.cols }).catch(() => undefined);
         }
         terminal.focus();
       });
     }
-  }, [sessionId, visible]);
+  }, [sessionId, streamId, visible]);
 
   return (
     <div
