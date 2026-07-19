@@ -2,7 +2,9 @@ import type { SessionStatus } from "./models";
 
 export type ActivityEvidence = "fallback" | "structured";
 
-export type LiveTurnPhase = "idle" | "working" | "completed";
+export type TerminalOutcome = "completed" | "failed" | "interrupted";
+
+export type LiveTurnPhase = "idle" | "working" | TerminalOutcome;
 
 export type AttentionKey = string;
 
@@ -12,7 +14,7 @@ export type ActivityEvent =
   | { type: "turn-started"; evidence: ActivityEvidence }
   | { type: "attention-requested"; evidence: ActivityEvidence; key: AttentionKey }
   | { type: "attention-resolved"; evidence: ActivityEvidence; key: AttentionKey }
-  | { type: "turn-completed"; evidence: ActivityEvidence }
+  | { type: "turn-ended"; evidence: ActivityEvidence; outcome: TerminalOutcome }
   | { type: "result-reviewed" };
 
 export interface LiveTurnLifecycle {
@@ -56,13 +58,18 @@ export function reduceLiveTurnLifecycle(
 
   switch (event.type) {
     case "turn-started":
-      return updateLifecycle(acceptedState, { phase: "working" });
+      return updateLifecycle(acceptedState, {
+        phase: "working",
+        pendingAttentionKeys: event.evidence === "structured"
+          ? []
+          : acceptedState.pendingAttentionKeys,
+      });
     case "attention-requested":
       return reduceAttentionRequested(acceptedState, event.key);
     case "attention-resolved":
       return reduceAttentionResolved(acceptedState, event.key);
-    case "turn-completed":
-      return updateLifecycle(acceptedState, { phase: "completed" });
+    case "turn-ended":
+      return updateLifecycle(acceptedState, { phase: event.outcome });
   }
 }
 
@@ -76,6 +83,10 @@ export function deriveLiveSessionStatus(state: LiveTurnLifecycle): LiveSessionSt
       return "working";
     case "completed":
       return "done";
+    case "failed":
+      return "attention";
+    case "interrupted":
+      return "idle";
   }
 }
 

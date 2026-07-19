@@ -48,7 +48,7 @@ const fallbackAttentionResolved = {
   evidence: "fallback",
   key: PTY_FALLBACK_ATTENTION_KEY,
 } satisfies ActivityEvent;
-const fallbackTurnCompleted = { type: "turn-completed", evidence: "fallback" } satisfies ActivityEvent;
+const fallbackTurnCompleted = { type: "turn-ended", evidence: "fallback", outcome: "completed" } satisfies ActivityEvent;
 
 describe("session lifecycle application", () => {
   it("initializes a live startup or reconnect boundary as idle without changing transport fields", () => {
@@ -104,6 +104,29 @@ describe("session lifecycle application", () => {
 
     expect(response.session.status).toBe("working");
     expect(response.lifecycle.pendingAttentionKeys).toEqual([]);
+  });
+
+  it("keeps fallback attention sticky when later terminal output looks like work", () => {
+    const initialized = initializeSessionLifecycle(session());
+    const attention = applySessionActivityEvents(
+      initialized.session,
+      initialized.lifecycle,
+      [fallbackTurnStarted, fallbackAttentionRequested],
+    );
+    const nextAction = selectTerminalOutputFallbackAction(attention.lifecycle, {
+      currentStatus: attention.session.status,
+      requestedAttention: false,
+      hasStartedWork: true,
+    });
+
+    expect(nextAction).toBe("start-turn");
+    const laterOutput = applySessionActivityEvent(
+      attention.session,
+      attention.lifecycle,
+      fallbackTurnStarted,
+    );
+    expect(laterOutput.session.status).toBe("attention");
+    expect(laterOutput.lifecycle.pendingAttentionKeys).toEqual([PTY_FALLBACK_ATTENTION_KEY]);
   });
 
   it("maps quiet-turn fallback completion to Done while preserving unresolved attention", () => {

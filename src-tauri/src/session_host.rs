@@ -7,7 +7,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-const VERSION: u8 = 2;
+mod codex_app_server;
+mod pi_rpc;
+
+const VERSION: u8 = 4;
 const MAX_ID: usize = 256;
 const MAX_ACTIVITY_KEY: usize = 512;
 const MAX_TEXT: usize = 4096;
@@ -37,9 +40,10 @@ struct StreamState {
     sequence: u64,
     transport_kind: BindingTransport,
     source: Option<SourceIdentity>,
+    prompt_readiness: PromptReadiness,
     current_turn: Option<TurnIdentity>,
     pending_attention_keys: HashSet<String>,
-    turn_completed: bool,
+    terminal_outcome: Option<TerminalOutcome>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +105,7 @@ pub struct HostedSessionSnapshot {
     stream_id: String,
     last_sequence: u64,
     transport: Transport,
+    prompt_readiness: PromptReadiness,
 }
 #[derive(Clone, Serialize)]
 #[serde(
@@ -124,6 +129,24 @@ enum Transport {
 enum LifecycleEvidence {
     Fallback,
     Structured,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[allow(dead_code)]
+enum PromptReadiness {
+    PtyFallbackSendable,
+    AwaitingAuthoritative,
+    Ready,
+    AuthRequired,
+    SetupRequired,
+    Unsupported,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum TerminalOutcome {
+    Completed,
+    Failed,
+    Interrupted,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -181,8 +204,9 @@ enum CandidateActivity {
         evidence: LifecycleEvidence,
         key: String,
     },
-    TurnCompleted {
+    TurnEnded {
         evidence: LifecycleEvidence,
+        outcome: TerminalOutcome,
     },
 }
 #[derive(Clone, Serialize)]
@@ -204,8 +228,9 @@ enum HostActivity {
         evidence: StructuredEvidence,
         key: String,
     },
-    TurnCompleted {
+    TurnEnded {
         evidence: StructuredEvidence,
+        outcome: TerminalOutcome,
     },
 }
 #[derive(Clone)]
@@ -213,6 +238,14 @@ struct StructuredActivityInput {
     source: SourceIdentity,
     context: ActivityContext,
     activity: CandidateActivity,
+}
+#[derive(Clone)]
+#[allow(dead_code)]
+struct StructuredPromptReadinessInput {
+    session_id: String,
+    stream_id: String,
+    source: SourceIdentity,
+    prompt_readiness: PromptReadiness,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -224,10 +257,19 @@ struct Envelope {
     event: HostEvent,
 }
 #[derive(Clone, Serialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
 enum HostEvent {
     Opened {
         transport: Transport,
+        prompt_readiness: PromptReadiness,
+    },
+    PromptReadinessChanged {
+        source: SourceIdentity,
+        prompt_readiness: PromptReadiness,
     },
     Activity {
         source: SourceIdentity,
@@ -397,6 +439,7 @@ fn open(
         lifecycle_evidence: LifecycleEvidence::Fallback,
         source: None,
     };
+    let prompt_readiness = PromptReadiness::PtyFallbackSendable;
     let stopper = pty.stopper();
     let binding = HostedBinding {
         stream: StreamState {
@@ -405,9 +448,10 @@ fn open(
             sequence: 0,
             transport_kind: BindingTransport::Pty,
             source: None,
+            prompt_readiness,
             current_turn: None,
             pending_attention_keys: HashSet::new(),
-            turn_completed: false,
+            terminal_outcome: None,
         },
         pty: Arc::new(Mutex::new(pty)),
         stopper,
@@ -426,6 +470,7 @@ fn open(
         stream_id: stream_id.clone(),
         last_sequence: 0,
         transport: transport.clone(),
+        prompt_readiness,
     };
     let _ = app.emit(
         "session-event",
@@ -434,7 +479,10 @@ fn open(
             session_id: r.session_id.clone(),
             stream_id: stream_id.clone(),
             sequence: 0,
-            event: HostEvent::Opened { transport },
+            event: HostEvent::Opened {
+                transport,
+                prompt_readiness,
+            },
         },
     );
     thread::spawn(move || {
@@ -695,6 +743,7 @@ pub fn session_list(host: State<'_, SessionHost>) -> Result<Vec<HostedSessionSna
                     stream_id: b.stream.stream_id.clone(),
                     last_sequence: b.stream.sequence,
                     transport,
+                    prompt_readiness: b.stream.prompt_readiness,
                 })
             }
             HostedEntry::Bound(_) => None,
@@ -741,7 +790,7 @@ fn accept_structured_activity(
         CandidateActivity::TurnStarted { .. } => {
             stream.current_turn = Some(input.context.turn.clone());
             stream.pending_attention_keys.clear();
-            stream.turn_completed = false;
+            stream.terminal_outcome = None;
         }
         CandidateActivity::AttentionRequested { key, .. } => {
             stream.pending_attention_keys.insert(key.clone());
@@ -749,8 +798,8 @@ fn accept_structured_activity(
         CandidateActivity::AttentionResolved { key, .. } => {
             stream.pending_attention_keys.remove(key);
         }
-        CandidateActivity::TurnCompleted { .. } => {
-            stream.turn_completed = true;
+        CandidateActivity::TurnEnded { outcome, .. } => {
+            stream.terminal_outcome = Some(*outcome);
         }
     }
 
@@ -768,6 +817,42 @@ fn accept_structured_activity(
     })
 }
 
+#[allow(dead_code)]
+fn accept_prompt_readiness(
+    session_id: &str,
+    stream: &mut StreamState,
+    input: StructuredPromptReadinessInput,
+) -> Result<Envelope, String> {
+    validate_identity(session_id, "Session ID")?;
+    validate_prompt_readiness_input(&input)?;
+    if input.session_id != session_id {
+        return Err("Prompt readiness session does not match binding".into());
+    }
+    if input.stream_id != stream.stream_id {
+        return Err("Prompt readiness stream is stale".into());
+    }
+    validate_structured_binding(stream, &input.source)?;
+    if input.prompt_readiness == PromptReadiness::PtyFallbackSendable {
+        return Err("Structured prompt readiness cannot use PTY fallback authority".into());
+    }
+    if stream.prompt_readiness == input.prompt_readiness {
+        return Err("Duplicate prompt readiness update".into());
+    }
+
+    stream.prompt_readiness = input.prompt_readiness;
+    stream.sequence += 1;
+    Ok(Envelope {
+        protocol_version: VERSION,
+        session_id: session_id.into(),
+        stream_id: stream.stream_id.clone(),
+        sequence: stream.sequence,
+        event: HostEvent::PromptReadinessChanged {
+            source: input.source,
+            prompt_readiness: input.prompt_readiness,
+        },
+    })
+}
+
 fn host_activity(activity: CandidateActivity) -> HostActivity {
     match activity {
         CandidateActivity::TurnStarted { .. } => HostActivity::TurnStarted {
@@ -781,15 +866,15 @@ fn host_activity(activity: CandidateActivity) -> HostActivity {
             evidence: StructuredEvidence::Structured,
             key,
         },
-        CandidateActivity::TurnCompleted { .. } => HostActivity::TurnCompleted {
+        CandidateActivity::TurnEnded { outcome, .. } => HostActivity::TurnEnded {
             evidence: StructuredEvidence::Structured,
+            outcome,
         },
     }
 }
 
 fn validate_structured_input(input: &StructuredActivityInput) -> Result<(), String> {
-    validate_identity(&input.source.agent_id, "Source agent ID")?;
-    validate_identity(&input.source.provider_session_id, "Provider session ID")?;
+    validate_source_identity(&input.source)?;
     validate_activity_key(&input.context.turn.key, "Turn key")?;
     if activity_evidence(&input.activity) != &LifecycleEvidence::Structured {
         return Err("Host activity evidence must be structured".into());
@@ -798,6 +883,17 @@ fn validate_structured_input(input: &StructuredActivityInput) -> Result<(), Stri
         validate_activity_key(key, "Attention key")?;
     }
     Ok(())
+}
+
+fn validate_prompt_readiness_input(input: &StructuredPromptReadinessInput) -> Result<(), String> {
+    validate_identity(&input.session_id, "Session ID")?;
+    validate_identity(&input.stream_id, "Session stream")?;
+    validate_source_identity(&input.source)
+}
+
+fn validate_source_identity(source: &SourceIdentity) -> Result<(), String> {
+    validate_identity(&source.agent_id, "Source agent ID")?;
+    validate_identity(&source.provider_session_id, "Provider session ID")
 }
 
 fn validate_structured_binding(
@@ -840,14 +936,14 @@ fn validate_activity_order(
                 if current_turn == turn {
                     return Err("Duplicate structured turn start".into());
                 }
-                if !stream.turn_completed || !stream.pending_attention_keys.is_empty() {
+                if stream.terminal_outcome.is_none() || !stream.pending_attention_keys.is_empty() {
                     return Err("Structured turn start is out of order".into());
                 }
             }
         }
         CandidateActivity::AttentionRequested { key, .. } => {
             require_current_turn(stream, turn)?;
-            if stream.turn_completed {
+            if stream.terminal_outcome.is_some() {
                 return Err("Structured attention request is stale".into());
             }
             if stream.pending_attention_keys.contains(key) {
@@ -860,10 +956,10 @@ fn validate_activity_order(
                 return Err("Structured attention resolution is uncorrelated".into());
             }
         }
-        CandidateActivity::TurnCompleted { .. } => {
+        CandidateActivity::TurnEnded { .. } => {
             require_current_turn(stream, turn)?;
-            if stream.turn_completed {
-                return Err("Duplicate structured turn completion".into());
+            if stream.terminal_outcome.is_some() {
+                return Err("Duplicate or conflicting structured terminal outcome".into());
             }
         }
     }
@@ -881,7 +977,7 @@ fn require_current_turn(stream: &StreamState, turn: &TurnIdentity) -> Result<(),
 fn activity_evidence(activity: &CandidateActivity) -> &LifecycleEvidence {
     match activity {
         CandidateActivity::TurnStarted { evidence }
-        | CandidateActivity::TurnCompleted { evidence }
+        | CandidateActivity::TurnEnded { evidence, .. }
         | CandidateActivity::AttentionRequested { evidence, .. }
         | CandidateActivity::AttentionResolved { evidence, .. } => evidence,
     }
@@ -891,7 +987,7 @@ fn activity_attention_key(activity: &CandidateActivity) -> Option<&str> {
     match activity {
         CandidateActivity::AttentionRequested { key, .. }
         | CandidateActivity::AttentionResolved { key, .. } => Some(key),
-        CandidateActivity::TurnStarted { .. } | CandidateActivity::TurnCompleted { .. } => None,
+        CandidateActivity::TurnStarted { .. } | CandidateActivity::TurnEnded { .. } => None,
     }
 }
 
@@ -1129,15 +1225,21 @@ mod tests {
         transport_kind: BindingTransport,
         source: Option<SourceIdentity>,
     ) -> StreamState {
+        let prompt_readiness = if transport_kind == BindingTransport::Pty && source.is_none() {
+            PromptReadiness::PtyFallbackSendable
+        } else {
+            PromptReadiness::AwaitingAuthoritative
+        };
         StreamState {
             agent_id: agent_id.into(),
             stream_id: "stream-1".into(),
             sequence: 0,
             transport_kind,
             source,
+            prompt_readiness,
             current_turn: None,
             pending_attention_keys: HashSet::new(),
-            turn_completed: false,
+            terminal_outcome: None,
         }
     }
 
@@ -1153,6 +1255,20 @@ mod tests {
         }
     }
 
+    fn readiness_input(
+        session_id: &str,
+        stream_id: &str,
+        source: SourceIdentity,
+        prompt_readiness: PromptReadiness,
+    ) -> StructuredPromptReadinessInput {
+        StructuredPromptReadinessInput {
+            session_id: session_id.into(),
+            stream_id: stream_id.into(),
+            source,
+            prompt_readiness,
+        }
+    }
+
     fn turn_started() -> CandidateActivity {
         CandidateActivity::TurnStarted {
             evidence: LifecycleEvidence::Structured,
@@ -1160,8 +1276,9 @@ mod tests {
     }
 
     fn turn_completed() -> CandidateActivity {
-        CandidateActivity::TurnCompleted {
+        CandidateActivity::TurnEnded {
             evidence: LifecycleEvidence::Structured,
+            outcome: TerminalOutcome::Completed,
         }
     }
 
@@ -1180,7 +1297,7 @@ mod tests {
     }
 
     #[test]
-    fn serialization_matches_v2() {
+    fn serialization_matches_v4() {
         let value = serde_json::to_value(HostedSessionSnapshot {
             protocol_version: VERSION,
             session_id: "s".into(),
@@ -1190,12 +1307,14 @@ mod tests {
                 lifecycle_evidence: LifecycleEvidence::Fallback,
                 source: None,
             },
+            prompt_readiness: PromptReadiness::PtyFallbackSendable,
         })
         .unwrap();
-        assert_eq!(value["protocolVersion"], 2);
+        assert_eq!(value["protocolVersion"], 4);
         assert_eq!(value["transport"]["type"], "pty");
         assert_eq!(value["transport"]["lifecycleEvidence"], "fallback");
         assert!(value["transport"].get("source").is_none());
+        assert_eq!(value["promptReadiness"], "pty-fallback-sendable");
 
         let structured = serde_json::to_value(HostedSessionSnapshot {
             protocol_version: VERSION,
@@ -1211,6 +1330,7 @@ mod tests {
                     SourceProvenance::ProviderHandshake,
                 ),
             },
+            prompt_readiness: PromptReadiness::AwaitingAuthoritative,
         })
         .unwrap();
         assert_eq!(structured["transport"]["type"], "protocol");
@@ -1228,6 +1348,24 @@ mod tests {
             structured["transport"]["source"]["provenance"],
             "provider-handshake"
         );
+        assert_eq!(structured["promptReadiness"], "awaiting-authoritative");
+
+        let opened = serde_json::to_value(Envelope {
+            protocol_version: VERSION,
+            session_id: "s".into(),
+            stream_id: "stream-1".into(),
+            sequence: 0,
+            event: HostEvent::Opened {
+                transport: Transport::Pty {
+                    lifecycle_evidence: LifecycleEvidence::Fallback,
+                    source: None,
+                },
+                prompt_readiness: PromptReadiness::PtyFallbackSendable,
+            },
+        })
+        .unwrap();
+        assert_eq!(opened["event"]["type"], "opened");
+        assert_eq!(opened["event"]["promptReadiness"], "pty-fallback-sendable");
     }
 
     #[test]
@@ -1301,6 +1439,151 @@ mod tests {
             assert_eq!(envelope.sequence, 1);
             assert_eq!(stream.sequence, 1);
             assert_eq!(stream.current_turn, Some(turn("turn-1")));
+        }
+    }
+
+    #[test]
+    fn prompt_readiness_gate_accepts_matching_structured_source_and_sequences_event() {
+        let bound_source = source(
+            "codex",
+            SourceIntegration::AppServer,
+            "codex-thread",
+            SourceProvenance::ProviderHandshake,
+        );
+        let event_source = source(
+            "codex",
+            SourceIntegration::AppServer,
+            "codex-thread",
+            SourceProvenance::ProviderEvent,
+        );
+        let mut stream = stream_state("codex", BindingTransport::Protocol, Some(bound_source));
+
+        let envelope = accept_prompt_readiness(
+            "session-1",
+            &mut stream,
+            readiness_input(
+                "session-1",
+                "stream-1",
+                event_source.clone(),
+                PromptReadiness::Ready,
+            ),
+        )
+        .expect("readiness accepted");
+
+        assert_eq!(stream.prompt_readiness, PromptReadiness::Ready);
+        assert_eq!(stream.sequence, 1);
+        assert_eq!(envelope.protocol_version, VERSION);
+        assert_eq!(envelope.sequence, 1);
+        match envelope.event {
+            HostEvent::PromptReadinessChanged {
+                source,
+                prompt_readiness,
+            } => {
+                assert_eq!(source, event_source);
+                assert_eq!(prompt_readiness, PromptReadiness::Ready);
+            }
+            _ => panic!("expected prompt readiness event"),
+        }
+    }
+
+    #[test]
+    fn prompt_readiness_gate_rejects_mismatch_duplicate_and_fallback_without_sequence() {
+        let event_source = source(
+            "codex",
+            SourceIntegration::AppServer,
+            "codex-thread",
+            SourceProvenance::ProviderEvent,
+        );
+        let bound_source = source(
+            "codex",
+            SourceIntegration::AppServer,
+            "codex-thread",
+            SourceProvenance::ProviderHandshake,
+        );
+        let mut fallback = stream_state("codex", BindingTransport::Pty, None);
+        assert!(accept_prompt_readiness(
+            "session-1",
+            &mut fallback,
+            readiness_input(
+                "session-1",
+                "stream-1",
+                event_source.clone(),
+                PromptReadiness::Ready,
+            ),
+        )
+        .is_err());
+        assert_eq!(fallback.sequence, 0);
+        assert_eq!(
+            fallback.prompt_readiness,
+            PromptReadiness::PtyFallbackSendable
+        );
+
+        let mut stream = stream_state("codex", BindingTransport::Protocol, Some(bound_source));
+        for input in [
+            readiness_input(
+                "other-session",
+                "stream-1",
+                event_source.clone(),
+                PromptReadiness::Ready,
+            ),
+            readiness_input(
+                "session-1",
+                "stream-2",
+                event_source.clone(),
+                PromptReadiness::Ready,
+            ),
+            readiness_input(
+                "session-1",
+                "stream-1",
+                source(
+                    "codex",
+                    SourceIntegration::AppServer,
+                    "other-thread",
+                    SourceProvenance::ProviderEvent,
+                ),
+                PromptReadiness::Ready,
+            ),
+            readiness_input(
+                "session-1",
+                "stream-1",
+                source(
+                    "pi",
+                    SourceIntegration::Rpc,
+                    "codex-thread",
+                    SourceProvenance::ProviderEvent,
+                ),
+                PromptReadiness::Ready,
+            ),
+            readiness_input(
+                "session-1",
+                "stream-1",
+                source(
+                    "codex",
+                    SourceIntegration::Hooks,
+                    "codex-thread",
+                    SourceProvenance::ProviderEvent,
+                ),
+                PromptReadiness::Ready,
+            ),
+            readiness_input(
+                "session-1",
+                "stream-1",
+                event_source.clone(),
+                PromptReadiness::PtyFallbackSendable,
+            ),
+            readiness_input(
+                "session-1",
+                "stream-1",
+                event_source.clone(),
+                PromptReadiness::AwaitingAuthoritative,
+            ),
+        ] {
+            assert!(accept_prompt_readiness("session-1", &mut stream, input).is_err());
+            assert_eq!(stream.sequence, 0);
+            assert_eq!(
+                stream.prompt_readiness,
+                PromptReadiness::AwaitingAuthoritative
+            );
         }
     }
 
@@ -1510,7 +1793,7 @@ mod tests {
         )
         .expect("completion accepted while attention remains pending");
         assert_eq!(stream.sequence, 3);
-        assert!(stream.turn_completed);
+        assert_eq!(stream.terminal_outcome, Some(TerminalOutcome::Completed));
 
         assert!(accept_structured_activity(
             "session-1",

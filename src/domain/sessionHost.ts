@@ -1,7 +1,17 @@
 import type { FirstClassAgentId } from "../agents/types";
 import type { ActivityEvent } from "./lifecycle";
 
-export const SESSION_HOST_PROTOCOL_VERSION = 2 as const;
+export const SESSION_HOST_PROTOCOL_VERSION = 4 as const;
+
+export const PROMPT_READINESS_STATES = [
+  "pty-fallback-sendable",
+  "awaiting-authoritative",
+  "ready",
+  "auth-required",
+  "setup-required",
+  "unsupported",
+] as const;
+export type PromptReadinessState = typeof PROMPT_READINESS_STATES[number];
 
 export type StructuredLifecycleIntegration = "app-server" | "hooks" | "rpc";
 export type StructuredSourceProvenance = "provider-event" | "provider-handshake";
@@ -89,6 +99,7 @@ export interface HostedSessionSnapshot {
   streamId: string;
   lastSequence: number;
   transport: SessionTransportDescriptor;
+  promptReadiness: PromptReadinessState;
 }
 
 export type SessionCloseOutcome =
@@ -100,7 +111,12 @@ export type TransportActivityEvent = Exclude<ActivityEvent, { type: "result-revi
 };
 
 export type SessionHostEvent =
-  | { type: "opened"; transport: SessionTransportDescriptor }
+  | { type: "opened"; transport: SessionTransportDescriptor; promptReadiness: PromptReadinessState }
+  | {
+    type: "prompt-readiness-changed";
+    source: StructuredLifecycleSource;
+    promptReadiness: PromptReadinessState;
+  }
   | {
     type: "activity";
     source: StructuredLifecycleSource;

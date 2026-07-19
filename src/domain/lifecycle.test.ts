@@ -26,13 +26,57 @@ describe("live turn lifecycle", () => {
     expect(deriveLiveSessionStatus(working)).toBe("working");
 
     const completed = reduceLiveTurnLifecycle(working, {
-      type: "turn-completed",
+      type: "turn-ended",
       evidence: "fallback",
+      outcome: "completed",
     });
     expect(deriveLiveSessionStatus(completed)).toBe("done");
 
     const reviewed = reduceLiveTurnLifecycle(completed, { type: "result-reviewed" });
     expect(deriveLiveSessionStatus(reviewed)).toBe("idle");
+  });
+
+  it.each([
+    ["completed", "done"],
+    ["failed", "attention"],
+    ["interrupted", "idle"],
+  ] as const)("maps the %s terminal outcome to %s", (outcome, expected) => {
+    const ended = reduceEvents([
+      { type: "turn-started", evidence: "structured" },
+      { type: "turn-ended", evidence: "structured", outcome },
+    ]);
+
+    expect(ended.phase).toBe(outcome);
+    expect(deriveLiveSessionStatus(ended)).toBe(expected);
+  });
+
+  it("does not review failed attention and clears a prior outcome for a new turn", () => {
+    const failed = reduceEvents([
+      { type: "turn-started", evidence: "structured" },
+      { type: "turn-ended", evidence: "structured", outcome: "failed" },
+    ]);
+    expect(reduceLiveTurnLifecycle(failed, { type: "result-reviewed" })).toBe(failed);
+
+    const next = reduceLiveTurnLifecycle(failed, { type: "turn-started", evidence: "structured" });
+    expect(next.phase).toBe("working");
+    expect(deriveLiveSessionStatus(next)).toBe("working");
+  });
+
+  it("keeps pending attention ahead of every terminal outcome until resolution", () => {
+    for (const outcome of ["completed", "failed", "interrupted"] as const) {
+      const ended = reduceEvents([
+        { type: "turn-started", evidence: "structured" },
+        { type: "attention-requested", evidence: "structured", key: "approval" },
+        { type: "turn-ended", evidence: "structured", outcome },
+      ]);
+      expect(deriveLiveSessionStatus(ended)).toBe("attention");
+      const resolved = reduceLiveTurnLifecycle(ended, {
+        type: "attention-resolved", evidence: "structured", key: "approval",
+      });
+      expect(deriveLiveSessionStatus(resolved)).toBe(
+        outcome === "completed" ? "done" : outcome === "failed" ? "attention" : "idle",
+      );
+    }
   });
 
   it("tracks multiple correlated pending attention keys", () => {
@@ -67,7 +111,7 @@ describe("live turn lifecycle", () => {
       { type: "turn-started", evidence: "structured" },
       { type: "attention-requested", evidence: "structured", key: "approval" },
       { type: "attention-requested", evidence: "structured", key: "input" },
-      { type: "turn-completed", evidence: "structured" },
+      { type: "turn-ended", evidence: "structured", outcome: "completed" },
     ]);
 
     expect(latentCompletion.phase).toBe("completed");
@@ -92,7 +136,7 @@ describe("live turn lifecycle", () => {
     const latentCompletion = reduceEvents([
       { type: "turn-started", evidence: "structured" },
       { type: "attention-requested", evidence: "structured", key: "approval" },
-      { type: "turn-completed", evidence: "structured" },
+      { type: "turn-ended", evidence: "structured", outcome: "completed" },
     ]);
 
     const reviewedWhileBlocked = reduceLiveTurnLifecycle(latentCompletion, {
@@ -172,8 +216,9 @@ describe("live turn lifecycle", () => {
     expect(deriveLiveSessionStatus(fallbackAttention)).toBe("attention");
 
     const structuredCompletion = reduceLiveTurnLifecycle(fallbackAttention, {
-      type: "turn-completed",
+      type: "turn-ended",
       evidence: "structured",
+      outcome: "completed",
     });
     expect(structuredCompletion.evidenceAuthority).toBe("structured");
     expect(structuredCompletion.pendingAttentionKeys).toEqual(["terminal-prompt"]);
@@ -210,8 +255,9 @@ describe("live turn lifecycle", () => {
     expect(oneResolved.pendingAttentionKeys).toEqual(["input"]);
 
     const fallbackCompletion = reduceLiveTurnLifecycle(oneResolved, {
-      type: "turn-completed",
+      type: "turn-ended",
       evidence: "fallback",
+      outcome: "completed",
     });
     expect(fallbackCompletion).toBe(oneResolved);
   });
@@ -245,7 +291,7 @@ describe("live turn lifecycle", () => {
 
     const completed = reduceEvents([
       { type: "turn-started", evidence: "structured" },
-      { type: "turn-completed", evidence: "structured" },
+      { type: "turn-ended", evidence: "structured", outcome: "completed" },
     ]);
     const fallbackRestart = reduceLiveTurnLifecycle(completed, {
       type: "turn-started",

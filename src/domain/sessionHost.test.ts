@@ -38,10 +38,10 @@ describe("session transport capabilities", () => {
   });
 });
 
-describe("session open request v2", () => {
+describe("session open request v4", () => {
   it("includes explicit PTY fallback transport, title, and terminal size for new sessions", () => {
     expect(openRequestFixture({ type: "new" })).toEqual({
-      protocolVersion: 2,
+      protocolVersion: SESSION_HOST_PROTOCOL_VERSION,
       sessionId: "session-1",
       agentId: "codex",
       workspacePath: "/workspace/project",
