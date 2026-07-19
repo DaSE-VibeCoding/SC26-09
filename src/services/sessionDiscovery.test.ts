@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { AgentSession, DiscoveredAgentSession, Workspace } from "../domain/models";
-import { mergeDiscoveredSessions, selectDiscoveryTerminalCleanupIds } from "./sessionDiscovery";
+import {
+  mergeDiscoveredSessions,
+  selectDiscoveryTerminalCleanupIds,
+  selectResumableWorkspaceSessions,
+} from "./sessionDiscovery";
 
 const workspace: Workspace = {
   id: "workspace-1",
@@ -24,6 +28,46 @@ const discovered: DiscoveredAgentSession = {
 };
 
 describe("session discovery merge", () => {
+  it("selects exact resumable handles for one workspace, newest first", () => {
+    const eligible: AgentSession = {
+      id: "older",
+      workspaceId: workspace.id,
+      agentId: "codex",
+      title: "Older",
+      status: "available",
+      createdAt: "2026-07-16T00:00:00.000Z",
+      lastActivityAt: "2026-07-17T00:00:00.000Z",
+      unread: false,
+      connected: false,
+      running: false,
+      externalSessionId: "provider-id-must-not-be-inferred",
+      resumeHandle: " exact-handle ",
+      origin: "codex-history",
+    };
+    const newest = {
+      ...eligible,
+      id: "newest",
+      lastActivityAt: "2026-07-18T00:00:00.000Z",
+      resumeHandle: "/exact/pi/session.jsonl",
+    };
+    const excluded = [
+      { ...eligible, id: "other-workspace", workspaceId: "workspace-2" },
+      { ...eligible, id: "connected", connected: true },
+      { ...eligible, id: "running", running: true },
+      { ...eligible, id: "missing-handle", resumeHandle: undefined },
+      { ...eligible, id: "blank-handle", resumeHandle: "   " },
+    ];
+
+    const selected = selectResumableWorkspaceSessions(
+      [eligible, ...excluded, newest],
+      workspace.id,
+    );
+
+    expect(selected).toEqual([newest, eligible]);
+    expect(selected[1]).toBe(eligible);
+    expect(selected[1].resumeHandle).toBe(" exact-handle ");
+  });
+
   it("adds provider history as an available, disconnected session", () => {
     const merged = mergeDiscoveredSessions([], [discovered], [workspace], () => "local-1");
     expect(merged).toEqual([expect.objectContaining({

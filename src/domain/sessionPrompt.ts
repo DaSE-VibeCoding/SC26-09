@@ -23,6 +23,10 @@ export const PROMPT_READINESS_COPY = {
 const CONNECT_OR_RESUME_COPY = "Connect or resume this session before sending a prompt.";
 const READINESS_UNAVAILABLE_COPY = PROMPT_READINESS_COPY["awaiting-authoritative"];
 const TRANSPORT_MISMATCH_COPY = "Prompt readiness does not match this session binding. Reconnect using an explicit supported recovery path.";
+const PROTOCOL_PROMPT_READINESS_COPY: Partial<Record<PromptReadinessState, string>> = {
+  "auth-required": "Authentication is required. Authenticate in the provider CLI, then reconnect. Your draft is preserved.",
+  "setup-required": "Provider setup is required. Finish setup in the provider CLI, then reconnect. Your draft is preserved.",
+};
 
 export type PromptAvailability =
   | {
@@ -81,7 +85,7 @@ export function selectPromptAvailability(
       providerReady: false,
       readiness,
       streamId: connection.streamId,
-      message: PROMPT_READINESS_COPY[readiness],
+      message: promptReadinessCopy(readiness, connection),
     };
   }
 
@@ -99,7 +103,7 @@ export function selectPromptAvailability(
       providerReady: true,
       readiness,
       streamId: connection.streamId,
-      message: PROMPT_READINESS_COPY.ready,
+      message: promptReadinessCopy(readiness, connection),
     };
   }
 
@@ -107,7 +111,7 @@ export function selectPromptAvailability(
     return blocked("mismatched-readiness", TRANSPORT_MISMATCH_COPY, readiness);
   }
 
-  return blocked("blocked-readiness", PROMPT_READINESS_COPY[readiness], readiness);
+  return blocked("blocked-readiness", promptReadinessCopy(readiness, connection), readiness);
 }
 
 export function buildPromptSendRequests(
@@ -160,6 +164,16 @@ function sourceIdentityMatches(a: StructuredLifecycleSource, b: StructuredLifecy
   return a.agentId === b.agentId
     && a.integration === b.integration
     && a.providerSessionId === b.providerSessionId;
+}
+
+function promptReadinessCopy(
+  readiness: PromptReadinessState,
+  connection: SessionConnectionSnapshot,
+): string {
+  if (connection.transport.type === "protocol") {
+    return PROTOCOL_PROMPT_READINESS_COPY[readiness] ?? PROMPT_READINESS_COPY[readiness];
+  }
+  return PROMPT_READINESS_COPY[readiness];
 }
 
 function blocked(

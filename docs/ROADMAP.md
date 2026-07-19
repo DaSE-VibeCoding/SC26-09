@@ -13,6 +13,9 @@
 - [x] Import saved Codex, Claude Code, and Pi sessions for added workspaces
 - [x] Distinguish provider liveness from a Pelican-owned terminal connection
 - [x] Resume saved history and attach supported Claude background jobs
+- [x] Browse/search same-workspace saved sessions across all first-class providers
+- [x] Export bounded visible session context as editable Markdown for a different agent
+- [x] Render rich local Git hunks with an on-demand Diffs.com component
 
 ## Milestone 1 — durable local sessions
 

@@ -10,7 +10,6 @@ export type IconName =
   | "files"
   | "git"
   | "folder"
-  | "folderOpen"
   | "file"
   | "chevron"
   | "stop"
@@ -33,9 +32,8 @@ const paths: Record<IconName, React.ReactNode> = {
   message: <><path d="M5 5h14v11H9l-4 3V5Z"/></>,
   files: <><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v5h5"/></>,
   git: <><circle cx="7" cy="6" r="2"/><circle cx="17" cy="18" r="2"/><path d="M7 8v7a3 3 0 0 0 3 3h5"/><path d="M7 11h5a3 3 0 0 0 3-3V6"/><circle cx="15" cy="5" r="2"/></>,
-  folder: <path d="M3 7h7l2-3h9v16H3z"/>,
-  folderOpen: <><path d="M3 8V6h7l2 2h9"/><path d="M3 9h19l-3 11H5z"/></>,
-  file: <><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v5h5"/></>,
+  folder: <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>,
+  file: <><path d="M10 12.5 8 15l2 2.5"/><path d="m14 12.5 2 2.5-2 2.5"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M4 22V4a2 2 0 0 1 2-2h9l5 5v15z"/></>,
   chevron: <path d="m9 6 6 6-6 6"/>,
   stop: <rect x="6" y="6" width="12" height="12" rx="2"/>,
   settings: <><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.5 1A8 8 0 0 0 15 6l-.4-2.7h-4L10 6a8 8 0 0 0-1.5 1l-2.5-1-2 3.4L6.1 11a7 7 0 0 0 0 2L4 14.5 6 18l2.5-1a8 8 0 0 0 1.5 1l.5 2.7h4L15 18a8 8 0 0 0 1.5-1l2.5 1 2-3.4-2.1-1.5a7 7 0 0 0 .1-1Z"/></>,
@@ -53,10 +51,11 @@ export function Icon({ name, size = 18, ...props }: IconProps) {
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.7"
+      strokeWidth={name === "folder" || name === "file" ? 2 : 1.7}
       strokeLinecap="round"
       strokeLinejoin="round"
       {...props}
+      data-icon={name}
     >
       {paths[name]}
     </svg>

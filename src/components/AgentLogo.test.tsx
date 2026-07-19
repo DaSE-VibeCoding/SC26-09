@@ -11,6 +11,7 @@ describe("AgentLogo", () => {
     expect(logos[0]).toContain('data-agent-logo="codex"');
     expect(logos[1]).toContain('data-agent-logo="claude-code"');
     expect(logos[2]).toContain('data-agent-logo="pi"');
+    logos.forEach((logo) => expect(logo).toContain('fill="#FFFFFF"'));
     expect(new Set(logos).size).toBe(3);
   });
 

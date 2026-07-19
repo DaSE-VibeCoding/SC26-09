@@ -4,8 +4,11 @@ import type { FirstClassAgentId } from "./agents/types";
 import { AgentLogo } from "./components/AgentLogo";
 import { CommandPalette, type PaletteAction } from "./components/CommandPalette";
 import { Icon } from "./components/Icon";
+import { LazyDiffViewer } from "./components/LazyDiffViewer";
 import { PelicanLogo } from "./components/PelicanLogo";
 import { PromptComposer } from "./components/PromptComposer";
+import { SessionBrowser } from "./components/SessionBrowser";
+import { SessionHandoffDialog } from "./components/SessionHandoffDialog";
 import { StatusDot } from "./components/StatusDot";
 import { TerminalView } from "./components/TerminalView";
 import { WorkspaceFileTree } from "./components/WorkspaceFileTree";
@@ -26,6 +29,7 @@ import {
 import {
   createSessionRuntimeState,
   reduceSessionRuntime,
+  selectSessionSurfaceState,
   type SessionRuntimeState,
 } from "./domain/sessionRuntime";
 import {
@@ -35,8 +39,10 @@ import {
 import { reduceSessionStatus, scanTerminalAttention, TURN_IDLE_MS } from "./domain/status";
 import {
   chooseWorkspace,
+  confirmDiscard,
   discoverAgentSessions,
   discoverAgents,
+  exportSessionHandoff,
   getGitChanges,
   getGitDiff,
   isTauri,
@@ -47,20 +53,26 @@ import {
   sendSession,
   stopSession as stopHostedSession,
 } from "./services/native";
-import { SESSION_HOST_PROTOCOL_VERSION, type SessionOpenRequest } from "./domain/sessionHost";
+import { hasInteractiveTerminal, SESSION_HOST_PROTOCOL_VERSION, type SessionOpenRequest } from "./domain/sessionHost";
 import {
   loadSessions,
   loadWorkspaces,
   saveSessions,
   saveWorkspaces,
 } from "./services/storage";
-import { mergeDiscoveredSessions, selectDiscoveryTerminalCleanupIds } from "./services/sessionDiscovery";
+import {
+  mergeDiscoveredSessions,
+  selectDiscoveryTerminalCleanupIds,
+  selectResumableWorkspaceSessions,
+} from "./services/sessionDiscovery";
+import { selectHandoffSourceSessions } from "./domain/sessionHandoff";
 import {
   enableNotifications,
   notificationsAreEnabled,
   notify,
 } from "./services/notifications";
 import { runIfNotInFlight } from "./services/actionLock";
+import { beginDiffFetch, type DiffState } from "./services/gitDiffState";
 import {
   appendTerminalBuffer,
   clearTerminalBuffer,
@@ -218,10 +230,15 @@ export default function App() {
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [changes, setChanges] = useState<GitChange[]>([]);
   const [selectedChange, setSelectedChange] = useState<string | null>(null);
-  const [diff, setDiff] = useState("");
+  const [diffState, setDiffState] = useState<DiffState>({ status: "loading" });
+  const [diffRetryKey, setDiffRetryKey] = useState(0);
   const [inspectorTab, setInspectorTab] = useState<"changes" | "files">("changes");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
+  const [sessionBrowserOpen, setSessionBrowserOpen] = useState(false);
+  const [handoffOpen, setHandoffOpen] = useState(false);
+  const [handoffDirty, setHandoffDirty] = useState(false);
+  const [handoffStarting, setHandoffStarting] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentsLoading, setAgentsLoading] = useState(true);
   const [sessionsRefreshing, setSessionsRefreshing] = useState(false);
@@ -265,6 +282,8 @@ export default function App() {
   const loadedWorkspaceIdRef = useRef<string | null>(null);
   const loadedDiffKeyRef = useRef<string | null>(null);
   const agentPickerRef = useDialogFocus<HTMLElement>(agentPickerOpen);
+  const sessionBrowserRef = useDialogFocus<HTMLDivElement>(sessionBrowserOpen);
+  const handoffRef = useDialogFocus<HTMLDivElement>(handoffOpen);
   const settingsRef = useDialogFocus<HTMLElement>(settingsOpen);
   const connectionFor = (sessionId: string) => sessionRuntime.connectionBySessionId[sessionId];
 
@@ -278,6 +297,9 @@ export default function App() {
   const activeSessionStopping = activeSession ? stoppingSessionIds.has(activeSession.id) : false;
   const activeSessionSending = activeSession ? sendingSessionIds.has(activeSession.id) : false;
   const activeSessionConnection = activeSession ? connectionFor(activeSession.id) : undefined;
+  const activeSessionSurface = selectSessionSurfaceState(activeSession, activeSessionConnection, mode);
+  const effectiveMode = activeSessionSurface.effectiveMode;
+  const terminalModeAvailable = activeSessionSurface.terminalAvailability !== "unavailable";
   const activePromptAvailability = selectPromptAvailability(activeSession, activeSessionConnection);
   const activeSessionCanAttach = Boolean(
     activeSession && !activeSession.connected && activeSession.running && activeSession.attachHandle,
@@ -285,7 +307,19 @@ export default function App() {
   const activeSessionCanResume = Boolean(
     activeSession && !activeSession.connected && !activeSession.running && activeSession.resumeHandle,
   );
-  const overlayOpen = paletteOpen || agentPickerOpen || settingsOpen;
+  const resumableWorkspaceSessions = activeWorkspace
+    ? selectResumableWorkspaceSessions(sessions, activeWorkspace.id)
+    : [];
+  const handoffSourceSessions = activeWorkspace
+    ? selectHandoffSourceSessions(sessions, activeWorkspace.id)
+    : [];
+  const installedAgentIds = new Set(installations
+    .filter((installation) => installation.installed && installation.executable)
+    .map((installation) => installation.agentId));
+  const canCreateHandoff = isTauri() && handoffSourceSessions.some((session) => (
+    [...installedAgentIds].some((agentId) => agentId !== session.agentId)
+  ));
+  const overlayOpen = paletteOpen || agentPickerOpen || sessionBrowserOpen || handoffOpen || settingsOpen;
   const prompt = activeSessionId ? drafts[activeSessionId] ?? "" : "";
   workspacesRef.current = workspaces;
   sessionsRef.current = sessions;
@@ -296,6 +330,10 @@ export default function App() {
     if (!activeSessionId) return;
     setDrafts((current) => ({ ...current, [activeSessionId]: value }));
   }, [activeSessionId]);
+
+  useEffect(() => {
+    if (mode !== effectiveMode) setMode(effectiveMode);
+  }, [effectiveMode, mode]);
 
   const updateRuntimeSession = (
     state: SessionRuntimeState,
@@ -335,10 +373,10 @@ export default function App() {
   }, [activeSessionId]);
 
   useEffect(() => {
-    if (mode === "prompt" && activeSessionId) {
+    if (effectiveMode === "prompt" && activeSessionId) {
       queueMicrotask(() => promptRef.current?.focus());
     }
-  }, [activeSessionId, mode]);
+  }, [activeSessionId, effectiveMode]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -409,7 +447,9 @@ export default function App() {
       const liveIds = hosted.map((snapshot) => snapshot.sessionId);
       const now = new Date().toISOString();
       const allocatedSessionIds = discovered.map(() => createId());
-      liveIds.forEach((sessionId) => initializeTerminalBuffer(sessionId));
+      hosted
+        .filter((snapshot) => hasInteractiveTerminal(snapshot.transport))
+        .forEach((snapshot) => initializeTerminalBuffer(snapshot.sessionId));
       setSessionRuntime((current) => {
         let allocatedSessionIdIndex = 0;
         const nextDiscoveredSessionId = () => {
@@ -540,21 +580,21 @@ export default function App() {
     let cancelled = false;
     if (!activeWorkspace || !selectedChange) {
       loadedDiffKeyRef.current = null;
-      setDiff("");
+      setDiffState({ status: "ready", patch: "" });
       return () => { cancelled = true; };
     }
     const diffKey = `${activeWorkspace.id}:${selectedChange}`;
-    if (loadedDiffKeyRef.current !== diffKey) setDiff("");
+    setDiffState((current) => beginDiffFetch(current, loadedDiffKeyRef.current, diffKey));
     loadedDiffKeyRef.current = diffKey;
     void getGitDiff(activeWorkspace.path, selectedChange)
       .then((nextDiff) => {
-        if (!cancelled) setDiff(nextDiff);
+        if (!cancelled) setDiffState({ status: "ready", patch: nextDiff });
       })
-      .catch(() => {
-        if (!cancelled) setDiff("Diff unavailable for this file.");
+      .catch((reason: unknown) => {
+        if (!cancelled) setDiffState({ status: "error", message: errorMessage(reason) });
       });
     return () => { cancelled = true; };
-  }, [activeWorkspace, contextRefreshKey, selectedChange]);
+  }, [activeWorkspace, contextRefreshKey, diffRetryKey, selectedChange]);
 
   useEffect(() => {
     let cancelled = false;
@@ -726,10 +766,12 @@ export default function App() {
     setSessionRuntime((current) => reduceSessionRuntime(current, { type: "review", sessionId }));
   }, []);
 
-  const createSession = useCallback(async (agentId: FirstClassAgentId) => {
+  const createSession = useCallback(async (agentId: FirstClassAgentId, initialDraft = "") => {
     await runIfNotInFlight(createSessionInFlightRef, async () => {
       if (!activeWorkspace) {
         setAgentPickerOpen(false);
+        setHandoffOpen(false);
+        setHandoffDirty(false);
         setError("Add a workspace before starting an agent session.");
         return;
       }
@@ -765,6 +807,9 @@ export default function App() {
       });
 
       setSessions((current) => [...current, session]);
+      if (initialDraft) {
+        setDrafts((current) => ({ ...current, [id]: initialDraft }));
+      }
       initializeTerminalBuffer(id);
       startingSessionIdsRef.current.add(id);
       setStartingSessionIds((current) => new Set(current).add(id));
@@ -775,9 +820,16 @@ export default function App() {
       try {
         const snapshot = await openSession(hostOpenRequest(session, activeWorkspace.path, launch.program, { type: "new" }), launch);
         setSessionRuntime((current) => reduceSessionRuntime(current, { type: "host-snapshot", snapshot }));
+        setHandoffOpen(false);
+        setHandoffDirty(false);
         queueMicrotask(() => promptRef.current?.focus());
       } catch (reason) {
         setSessions((current) => current.filter((candidate) => candidate.id !== id));
+        setDrafts((current) => {
+          const next = { ...current };
+          delete next[id];
+          return next;
+        });
         clearTerminalBuffer(id);
         setActiveSessionId((current) => current === id ? previousActiveSessionId : current);
         setError(`Could not start ${adapter.displayName}: ${errorMessage(reason)}`);
@@ -791,6 +843,15 @@ export default function App() {
       }
     });
   }, [activeSessionId, activeWorkspace, installations]);
+
+  const startHandoffSession = useCallback(async (agentId: FirstClassAgentId, markdown: string) => {
+    setHandoffStarting(true);
+    try {
+      await createSession(agentId, markdown);
+    } finally {
+      setHandoffStarting(false);
+    }
+  }, [createSession]);
 
   const connectSession = useCallback(async (target: AgentSession) => {
     if (target.connected || startingSessionIdsRef.current.has(target.id)) return;
@@ -842,7 +903,7 @@ export default function App() {
           .then((hosted) => hosted.find((candidate) => candidate.sessionId === target.id))
           .catch(() => undefined);
         if (snapshot) {
-          initializeTerminalBuffer(target.id);
+          if (hasInteractiveTerminal(snapshot.transport)) initializeTerminalBuffer(target.id);
           setSessionRuntime((current) => reduceSessionRuntime(
             updateRuntimeSession(current, target.id, (session) => ({ ...session, unread: false })),
             { type: "host-snapshot", snapshot },
@@ -1036,17 +1097,56 @@ export default function App() {
     setAgentPickerOpen(true);
   }, []);
 
+  const openSessionBrowser = useCallback(() => {
+    if (!activeWorkspaceRef.current) {
+      setError("Add a workspace before browsing saved sessions.");
+      return;
+    }
+    setSessionBrowserOpen(true);
+  }, []);
+
+  const openHandoff = useCallback(() => {
+    if (!activeWorkspaceRef.current) {
+      setError("Add a workspace before sharing saved agent context.");
+      return;
+    }
+    setHandoffDirty(false);
+    setHandoffOpen(true);
+  }, []);
+
+  const requestCloseHandoff = useCallback(async () => {
+    if (handoffDirty) {
+      try {
+        if (!await confirmDiscard("Discard your edited handoff briefing?")) return;
+      } catch (reason) {
+        setError(`Could not open the discard confirmation: ${errorMessage(reason)}`);
+        return;
+      }
+    }
+    setHandoffOpen(false);
+    setHandoffDirty(false);
+  }, [handoffDirty]);
+
   const hasActiveWorkspace = activeWorkspace !== null;
   const hasActiveSession = activeSession !== null;
-  const actions = useMemo<PaletteAction[]>(() => [
-    { id: "add-workspace", icon: "folder", label: "Add workspace", detail: "Open a local project", shortcut: "⇧⌘O", run: () => { void addWorkspace(); } },
-    { id: "new-session", icon: "plus", label: "New agent session", detail: hasActiveWorkspace ? "Codex, Claude Code, or Pi" : "Add a workspace first", shortcut: "⇧⌘N", disabled: !hasActiveWorkspace, run: openAgentPicker },
-    { id: "refresh-sessions", icon: "refresh", label: "Refresh agent sessions", detail: "Discover saved and running CLI sessions", disabled: !hasActiveWorkspace || sessionsRefreshing, run: () => { void refreshDiscoveredSessions(true); } },
-    { id: "toggle-mode", icon: "terminal", label: `Switch to ${mode === "prompt" ? "terminal" : "prompt"}`, shortcut: "⌃`", disabled: !hasActiveSession, run: () => setMode((current) => current === "prompt" ? "terminal" : "prompt") },
-    { id: "show-changes", icon: "git", label: "Show Git changes", shortcut: "⇧⌘G", run: () => setInspectorTab("changes") },
-    { id: "show-files", icon: "files", label: "Show workspace files", shortcut: "⇧⌘E", run: () => setInspectorTab("files") },
-    { id: "settings", icon: "settings", label: "Open settings", detail: "Agents and keyboard shortcuts", shortcut: "⌘,", run: () => setSettingsOpen(true) },
-  ], [addWorkspace, hasActiveSession, hasActiveWorkspace, mode, openAgentPicker, refreshDiscoveredSessions, sessionsRefreshing]);
+  const actions = useMemo<PaletteAction[]>(() => {
+    const next: PaletteAction[] = [
+      { id: "add-workspace", icon: "folder", label: "Add workspace", detail: "Open a local project", shortcut: "⇧⌘O", run: () => { void addWorkspace(); } },
+      { id: "new-session", icon: "plus", label: "New agent session", detail: hasActiveWorkspace ? "Codex, Claude Code, or Pi" : "Add a workspace first", shortcut: "⇧⌘N", disabled: !hasActiveWorkspace, run: openAgentPicker },
+      { id: "browse-sessions", icon: "refresh", label: "Browse saved sessions", detail: hasActiveWorkspace ? "Resume Codex, Claude Code, or Pi history" : "Add a workspace first", disabled: !hasActiveWorkspace, run: openSessionBrowser },
+      { id: "cross-agent-handoff", icon: "message", label: "Hand off saved context", detail: isTauri() ? "Create an editable Markdown briefing for another agent" : "Available in the desktop app", disabled: !canCreateHandoff, run: openHandoff },
+      { id: "refresh-sessions", icon: "refresh", label: "Refresh agent sessions", detail: "Discover saved and running CLI sessions", disabled: !hasActiveWorkspace || sessionsRefreshing, run: () => { void refreshDiscoveredSessions(true); } },
+    ];
+    if (hasActiveSession && terminalModeAvailable) {
+      next.push({ id: "toggle-mode", icon: "terminal", label: `Switch to ${effectiveMode === "prompt" ? "terminal" : "prompt"}`, shortcut: "⌃`", run: () => setMode((current) => current === "prompt" ? "terminal" : "prompt") });
+    }
+    next.push(
+      { id: "show-changes", icon: "git", label: "Show Git changes", shortcut: "⇧⌘G", run: () => setInspectorTab("changes") },
+      { id: "show-files", icon: "files", label: "Show workspace files", shortcut: "⇧⌘E", run: () => setInspectorTab("files") },
+      { id: "settings", icon: "settings", label: "Open settings", detail: "Agents and keyboard shortcuts", shortcut: "⌘,", run: () => setSettingsOpen(true) },
+    );
+    return next;
+  }, [addWorkspace, canCreateHandoff, effectiveMode, hasActiveSession, hasActiveWorkspace, openAgentPicker, openHandoff, openSessionBrowser, refreshDiscoveredSessions, sessionsRefreshing, terminalModeAvailable]);
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
@@ -1056,7 +1156,12 @@ export default function App() {
       };
       if (event.key === "Escape" && overlayOpen) {
         claimShortcut();
+        if (handoffOpen) {
+          void requestCloseHandoff();
+          return;
+        }
         setAgentPickerOpen(false);
+        setSessionBrowserOpen(false);
         setPaletteOpen(false);
         setSettingsOpen(false);
         return;
@@ -1081,6 +1186,7 @@ export default function App() {
         claimShortcut();
         setSettingsOpen(true);
       } else if (event.ctrlKey && event.key === "`") {
+        if (!terminalModeAvailable) return;
         claimShortcut();
         setMode((current) => current === "prompt" ? "terminal" : "prompt");
       } else if (event.metaKey && /^[1-9]$/.test(event.key)) {
@@ -1093,7 +1199,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handleKey, true);
     return () => window.removeEventListener("keydown", handleKey, true);
-  }, [addWorkspace, openAgentPicker, overlayOpen, selectSession]);
+  }, [addWorkspace, handoffOpen, openAgentPicker, overlayOpen, requestCloseHandoff, selectSession, terminalModeAvailable]);
 
   return (
     <main className={`app-shell${isTauri() ? "" : " has-preview-banner"}`}>
@@ -1173,6 +1279,13 @@ export default function App() {
                     <button type="button" className="new-session-row" onClick={openAgentPicker}>
                       <Icon name="plus" size={14} /> New session
                     </button>
+                    <button type="button" className="new-session-row" onClick={openSessionBrowser}>
+                      <Icon name="refresh" size={14} /> Browse saved sessions
+                      {resumableWorkspaceSessions.length > 0 && <span className="sidebar-action-count">{resumableWorkspaceSessions.length}</span>}
+                    </button>
+                    <button type="button" className="new-session-row" disabled={!canCreateHandoff} onClick={openHandoff} title={canCreateHandoff ? "Create a Markdown briefing for a different agent" : "A resumable source and a different installed agent are required"}>
+                      <Icon name="message" size={14} /> Hand off context
+                    </button>
                   </div>
                 )}
               </section>
@@ -1223,37 +1336,39 @@ export default function App() {
           <div className="empty-state">
             <span className="eyebrow">{activeWorkspace.name}</span>
             <h1>Start an agent session.</h1>
-            <p>Every session gets a real terminal and a shared lifecycle, regardless of agent.</p>
+            <p>Every session gets one Pelican-owned binding and a shared lifecycle, regardless of agent.</p>
             <button type="button" className="primary-button" onClick={openAgentPicker}>
               <Icon name="plus" size={16} /> New session
             </button>
           </div>
         ) : (
           <div className="session-surface">
-            <div className="session-toolbar">
-              <div className="mode-switch" role="group" aria-label="Session input mode">
-                <button type="button" aria-pressed={mode === "prompt"} className={mode === "prompt" ? "is-active" : ""} onClick={() => setMode("prompt")}>
-                  <Icon name="message" size={14} /> Prompt
-                </button>
-                <button type="button" aria-pressed={mode === "terminal"} className={mode === "terminal" ? "is-active" : ""} onClick={() => setMode("terminal")}>
-                  <Icon name="terminal" size={14} /> Terminal
-                </button>
+            {terminalModeAvailable && (
+              <div className="session-toolbar">
+                <div className="mode-switch" role="group" aria-label="Session input mode">
+                  <button type="button" aria-pressed={effectiveMode === "prompt"} className={effectiveMode === "prompt" ? "is-active" : ""} onClick={() => setMode("prompt")}>
+                    <Icon name="message" size={14} /> Prompt
+                  </button>
+                  <button type="button" aria-pressed={effectiveMode === "terminal"} className={effectiveMode === "terminal" ? "is-active" : ""} onClick={() => setMode("terminal")}>
+                    <Icon name="terminal" size={14} /> Terminal
+                  </button>
+                </div>
+                <span className="mode-hint">⌃` to switch</span>
               </div>
-              <span className="mode-hint">⌃` to switch</span>
-            </div>
+            )}
 
             <div className="terminal-frame">
-              {activeSession.connected && (
+              {activeSessionSurface.canMountTerminalView && activeSessionConnection && (
                 <TerminalView
                   sessionId={activeSession.id}
-                  streamId={connectionFor(activeSession.id)?.streamId ?? ""}
-                  visible={mode === "terminal"}
-                  interactive={mode === "terminal" && !activeSessionStarting && !activeSessionStopping}
+                  streamId={activeSessionConnection.streamId}
+                  visible={effectiveMode === "terminal"}
+                  interactive={effectiveMode === "terminal" && !activeSessionStarting && !activeSessionStopping}
                   onInput={handleTerminalInput}
                   onError={(message) => setError(`Terminal input failed: ${message}`)}
                 />
               )}
-              {mode === "terminal" && !activeSession.connected && (
+              {effectiveMode === "terminal" && activeSessionSurface.terminalAvailability === "recovery" && (
                 <div className="terminal-unavailable">
                   {activeSessionStarting ? (
                     <>
@@ -1286,7 +1401,7 @@ export default function App() {
                   )}
                 </div>
               )}
-              {mode === "prompt" && (
+              {effectiveMode === "prompt" && (
                 <div className="prompt-view">
                   <div className="session-identity">
                     <AgentLogo agentId={activeSession.agentId} size={44} />
@@ -1308,7 +1423,9 @@ export default function App() {
                             ? "No interactive terminal is connected for this session."
                         : activeSession.status === "attention"
                           ? "The agent is waiting for your response."
-                          : "The full terminal stays active behind this focused command surface."}</p>
+                          : activeSessionSurface.terminalAvailability === "interactive"
+                            ? "The full terminal stays active behind this focused command surface."
+                            : "This binding exposes Prompt without an interactive terminal."}</p>
                   </div>
                   {activeSessionStarting ? (
                     <div className="session-recovery is-launching">
@@ -1404,7 +1521,15 @@ export default function App() {
             {selectedChange && (
               <div className="mini-diff">
                 <div className="diff-heading" title={selectedChange}>{basename(selectedChange)}</div>
-                <pre>{diff || "No text diff available."}</pre>
+                {diffState.status === "loading" && <LazyDiffViewer state="loading" />}
+                {diffState.status === "ready" && <LazyDiffViewer state="ready" patch={diffState.patch} />}
+                {diffState.status === "error" && (
+                  <LazyDiffViewer
+                    state="error"
+                    error={diffState.message}
+                    onRetry={() => setDiffRetryKey((current) => current + 1)}
+                  />
+                )}
               </div>
             )}
           </div>
@@ -1417,7 +1542,7 @@ export default function App() {
             <button type="button" className="icon-button dialog-close" data-dialog-initial-focus onClick={() => setAgentPickerOpen(false)} aria-label="Close agent picker"><Icon name="close" size={16} /></button>
             <span className="eyebrow">New session</span>
             <h2 id="agent-picker-title">Choose an agent</h2>
-            <p>Each first-class agent uses the same terminal and session lifecycle.</p>
+            <p>Each first-class agent uses one Pelican-owned binding and the same session lifecycle.</p>
             <div className="agent-options">
               {agentRegistry.map((adapter) => {
                 const installation = installations.find((candidate) => candidate.agentId === adapter.id);
@@ -1432,6 +1557,41 @@ export default function App() {
               })}
             </div>
           </section>
+        </div>
+      )}
+
+      {sessionBrowserOpen && activeWorkspace && (
+        <div ref={sessionBrowserRef} tabIndex={-1} className="dialog-focus-scope">
+          <SessionBrowser
+            workspaceName={activeWorkspace.name}
+            workspaceId={activeWorkspace.id}
+            sessions={sessions}
+            installations={installations}
+            loading={sessionsRefreshing}
+            startingSessionIds={startingSessionIds}
+            onRefresh={() => { void refreshDiscoveredSessions(true); }}
+            onResume={(session) => {
+              setSessionBrowserOpen(false);
+              selectSession(session.id);
+              void connectSession(session);
+            }}
+            onClose={() => setSessionBrowserOpen(false)}
+          />
+        </div>
+      )}
+
+      {handoffOpen && activeWorkspace && (
+        <div ref={handoffRef} tabIndex={-1} className="dialog-focus-scope">
+          <SessionHandoffDialog
+            workspace={activeWorkspace}
+            sessions={sessions}
+            installations={installations}
+            generateExport={exportSessionHandoff}
+            starting={handoffStarting}
+            onDirtyChange={setHandoffDirty}
+            onStart={startHandoffSession}
+            onCancel={requestCloseHandoff}
+          />
         </div>
       )}
 

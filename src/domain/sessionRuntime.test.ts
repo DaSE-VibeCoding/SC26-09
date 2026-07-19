@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { AgentSession } from "./models";
-import { createSessionRuntimeState, reduceSessionRuntime } from "./sessionRuntime";
+import type { AgentSession, SessionMode } from "./models";
+import { createSessionRuntimeState, reduceSessionRuntime, selectSessionSurfaceState, type SessionConnectionSnapshot, type SessionSurfaceState } from "./sessionRuntime";
 import { SESSION_HOST_PROTOCOL_VERSION, type PromptReadinessState, type SessionEventEnvelope, type StructuredLifecycleSource, type StructuredTurnIdentity } from "./sessionHost";
 
 const session = (overrides: Partial<AgentSession> = {}): AgentSession => ({
@@ -40,6 +40,96 @@ const activity = (
   activityTurn = turn,
   activitySource = source,
 ) => envelope(sequence, { type: "activity", source: activitySource, context: { turn: activityTurn }, activity });
+
+const ptyConnection = (open = true): SessionConnectionSnapshot => ({
+  streamId: "stream-1",
+  transport: { type: "pty", lifecycleEvidence: "fallback" },
+  open,
+  promptReadiness: "pty-fallback-sendable",
+});
+const protocolConnection = (open = true): SessionConnectionSnapshot => ({
+  streamId: "stream-1",
+  transport: { type: "protocol", lifecycleEvidence: "structured", source: handshakeSource },
+  open,
+  promptReadiness: "awaiting-authoritative",
+  source: handshakeSource,
+});
+
+describe("session surface selector", () => {
+  it.each([
+    {
+      name: "connected open PTY preserves requested Prompt and mounts TerminalView hidden",
+      selected: session({ connected: true }),
+      connection: ptyConnection(true),
+      requestedMode: "prompt",
+      expected: { effectiveMode: "prompt", terminalAvailability: "interactive", canMountTerminalView: true },
+    },
+    {
+      name: "connected open PTY preserves requested Terminal",
+      selected: session({ connected: true }),
+      connection: ptyConnection(true),
+      requestedMode: "terminal",
+      expected: { effectiveMode: "terminal", terminalAvailability: "interactive", canMountTerminalView: true },
+    },
+    {
+      name: "connected open protocol coerces Prompt and blocks TerminalView",
+      selected: session({ connected: true }),
+      connection: protocolConnection(true),
+      requestedMode: "terminal",
+      expected: { effectiveMode: "prompt", terminalAvailability: "unavailable", canMountTerminalView: false },
+    },
+    {
+      name: "connected session without accepted connection fails closed",
+      selected: session({ connected: true }),
+      connection: undefined,
+      requestedMode: "terminal",
+      expected: { effectiveMode: "prompt", terminalAvailability: "unavailable", canMountTerminalView: false },
+    },
+    {
+      name: "connected session with closed connection fails closed",
+      selected: session({ connected: true }),
+      connection: ptyConnection(false),
+      requestedMode: "terminal",
+      expected: { effectiveMode: "prompt", terminalAvailability: "unavailable", canMountTerminalView: false },
+    },
+    {
+      name: "disconnected session without connection preserves Terminal recovery mode",
+      selected: session({ connected: false, running: false }),
+      connection: undefined,
+      requestedMode: "terminal",
+      expected: { effectiveMode: "terminal", terminalAvailability: "recovery", canMountTerminalView: false },
+    },
+    {
+      name: "disconnected closed PTY preserves Terminal recovery mode",
+      selected: session({ connected: false, running: false }),
+      connection: ptyConnection(false),
+      requestedMode: "terminal",
+      expected: { effectiveMode: "terminal", terminalAvailability: "recovery", canMountTerminalView: false },
+    },
+    {
+      name: "closed known protocol coerces Prompt",
+      selected: session({ connected: false, running: false }),
+      connection: protocolConnection(false),
+      requestedMode: "terminal",
+      expected: { effectiveMode: "prompt", terminalAvailability: "unavailable", canMountTerminalView: false },
+    },
+    {
+      name: "missing selection is Prompt-only",
+      selected: null,
+      connection: undefined,
+      requestedMode: "terminal",
+      expected: { effectiveMode: "prompt", terminalAvailability: "unavailable", canMountTerminalView: false },
+    },
+  ] satisfies ReadonlyArray<{
+    name: string;
+    selected: AgentSession | null;
+    connection: SessionConnectionSnapshot | undefined;
+    requestedMode: SessionMode;
+    expected: SessionSurfaceState;
+  }>)("$name", ({ selected, connection, requestedMode, expected }) => {
+    expect(selectSessionSurfaceState(selected, connection, requestedMode)).toEqual(expected);
+  });
+});
 
 describe("session runtime reducer", () => {
   it("atomically initializes, applies local activity, reviews, and removes", () => {

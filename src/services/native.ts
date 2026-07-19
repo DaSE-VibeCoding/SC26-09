@@ -1,6 +1,6 @@
 import { invoke, isTauri as coreIsTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
 import type {
   AgentInstallation,
   DiscoveredAgentSession,
@@ -10,6 +10,7 @@ import type {
   TerminalOutputEvent,
 } from "../domain/models";
 import type { HostedSessionSnapshot, SessionEventEnvelope, SessionOpenRequest, SessionResizeRequest, SessionSendRequest, SessionStopRequest } from "../domain/sessionHost";
+import type { SessionHandoffExportRequest, SessionHandoffExportResponse } from "../domain/sessionHandoff";
 import { decodeHostedSessionSnapshot, decodeSessionEventEnvelope } from "./sessionHostCodec";
 import type { AgentLaunchSpec } from "../agents/types";
 
@@ -41,6 +42,16 @@ export async function chooseWorkspace(): Promise<string | null> {
   return typeof result === "string" ? result : null;
 }
 
+export async function confirmDiscard(message: string): Promise<boolean> {
+  if (!isTauri()) return typeof window !== "undefined" && window.confirm(message);
+  return confirm(message, {
+    title: "Pelican",
+    kind: "warning",
+    okLabel: "Discard",
+    cancelLabel: "Keep editing",
+  });
+}
+
 export async function discoverAgents(): Promise<AgentInstallation[]> {
   if (!isTauri()) {
     return [
@@ -57,6 +68,13 @@ export async function discoverAgentSessions(
 ): Promise<DiscoveredAgentSession[]> {
   if (!isTauri() || workspacePaths.length === 0) return [];
   return invoke<DiscoveredAgentSession[]>("discover_agent_sessions", { workspacePaths });
+}
+
+export async function exportSessionHandoff(
+  request: SessionHandoffExportRequest,
+): Promise<SessionHandoffExportResponse> {
+  requireTauri("Exporting saved agent context");
+  return invoke<SessionHandoffExportResponse>("export_session_handoff", { request });
 }
 
 export async function spawnTerminal(request: SpawnTerminalRequest): Promise<void> {

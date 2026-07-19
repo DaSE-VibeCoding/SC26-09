@@ -34,6 +34,7 @@ struct HostedBinding {
     legacy: bool,
 }
 
+#[derive(Clone)]
 struct StreamState {
     agent_id: String,
     stream_id: String,
@@ -776,6 +777,54 @@ fn expected_structured_transport(agent_id: &str) -> Option<BindingTransport> {
 }
 
 #[allow(dead_code)]
+fn accept_structured_source_ready(
+    session_id: &str,
+    stream: &mut StreamState,
+    source: SourceIdentity,
+) -> Result<Envelope, String> {
+    validate_identity(session_id, "Session ID")?;
+    validate_source_identity(&source)?;
+    if source.provenance != SourceProvenance::ProviderHandshake {
+        return Err("Structured source binding requires provider handshake provenance".into());
+    }
+    if stream.source.is_some() {
+        return Err("Structured source is already bound".into());
+    }
+    if stream.prompt_readiness != PromptReadiness::AwaitingAuthoritative {
+        return Err("Structured source can only bind an awaiting stream".into());
+    }
+    if stream.agent_id != source.agent_id {
+        return Err("Structured source agent does not match binding".into());
+    }
+    let Some(expected_integration) = expected_integration(&stream.agent_id) else {
+        return Err("Structured source agent is unsupported".into());
+    };
+    if source.integration != expected_integration {
+        return Err("Structured source integration does not match binding".into());
+    }
+    let Some(expected_transport) = expected_structured_transport(&stream.agent_id) else {
+        return Err("Structured source transport is unsupported".into());
+    };
+    if stream.transport_kind != expected_transport {
+        return Err("Structured source transport does not match integration".into());
+    }
+
+    stream.source = Some(source.clone());
+    stream.prompt_readiness = PromptReadiness::Ready;
+    stream.sequence += 1;
+    Ok(Envelope {
+        protocol_version: VERSION,
+        session_id: session_id.into(),
+        stream_id: stream.stream_id.clone(),
+        sequence: stream.sequence,
+        event: HostEvent::PromptReadinessChanged {
+            source,
+            prompt_readiness: PromptReadiness::Ready,
+        },
+    })
+}
+
+#[allow(dead_code)]
 fn accept_structured_activity(
     session_id: &str,
     stream: &mut StreamState,
@@ -1439,6 +1488,62 @@ mod tests {
             assert_eq!(envelope.sequence, 1);
             assert_eq!(stream.sequence, 1);
             assert_eq!(stream.current_turn, Some(turn("turn-1")));
+        }
+    }
+
+    #[test]
+    fn structured_source_ready_bind_is_atomic_and_handshake_provenanced() {
+        let handshake_source = source(
+            "codex",
+            SourceIntegration::AppServer,
+            "codex-thread",
+            SourceProvenance::ProviderHandshake,
+        );
+        let mut stream = stream_state("codex", BindingTransport::Protocol, None);
+
+        let envelope =
+            accept_structured_source_ready("session-1", &mut stream, handshake_source.clone())
+                .expect("source readiness accepted");
+
+        assert_eq!(stream.source, Some(handshake_source.clone()));
+        assert_eq!(stream.prompt_readiness, PromptReadiness::Ready);
+        assert_eq!(stream.sequence, 1);
+        match envelope.event {
+            HostEvent::PromptReadinessChanged {
+                source,
+                prompt_readiness,
+            } => {
+                assert_eq!(source, handshake_source);
+                assert_eq!(prompt_readiness, PromptReadiness::Ready);
+            }
+            _ => panic!("expected readiness change"),
+        }
+
+        for rejected_source in [
+            source(
+                "codex",
+                SourceIntegration::AppServer,
+                "codex-thread-2",
+                SourceProvenance::ProviderEvent,
+            ),
+            source(
+                "pi",
+                SourceIntegration::Rpc,
+                "codex-thread-2",
+                SourceProvenance::ProviderHandshake,
+            ),
+        ] {
+            let mut rejected = stream_state("codex", BindingTransport::Protocol, None);
+            assert!(
+                accept_structured_source_ready("session-1", &mut rejected, rejected_source)
+                    .is_err()
+            );
+            assert!(rejected.source.is_none());
+            assert_eq!(
+                rejected.prompt_readiness,
+                PromptReadiness::AwaitingAuthoritative
+            );
+            assert_eq!(rejected.sequence, 0);
         }
     }
 

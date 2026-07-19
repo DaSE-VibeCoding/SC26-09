@@ -1,6 +1,6 @@
 # Pelican product acceptance checklist
 
-Last audited: 2026-07-17
+Last audited: 2026-07-18
 
 This document converts Pelican's product statement into verifiable behavior. It is both an implementation audit and the repeatable checklist used before a release.
 
@@ -17,13 +17,13 @@ Do not mark **unified real-time agent management** complete until the golden wor
 
 | Product promise | Status | Current reality |
 | --- | --- | --- |
-| Lightweight macOS desktop app | Partial | Tauri, React, TypeScript, and a small dependency set form a good prototype. Packaging, signing, notarization, updates, and measured startup/memory budgets are missing. |
-| Manage multiple agents across projects | Partial | Multiple workspaces and first-class Codex, Claude Code, and Pi sessions work. Workspace/session rename, archive, removal, search, and durable supervision are incomplete. |
-| Unified view of all threads and sessions | Partial | Saved Codex, Claude Code, and Pi sessions can be discovered for added workspaces. Arbitrary foreground TUIs cannot generally be attached, stale results are not reconciled, and Codex listing is not paginated. |
+| Lightweight macOS desktop app | Partial | Tauri, React, TypeScript, and a small runtime dependency set form a good prototype. The larger Diffs/Shiki renderer is lazy-loaded. Packaging, signing, notarization, updates, and measured startup/memory budgets are missing. |
+| Manage multiple agents across projects | Partial | Multiple workspaces and first-class Codex, Claude Code, and Pi sessions work. A same-workspace saved-session browser searches and resumes exact closed histories. Workspace/session rename, archive, removal, broader search, and durable supervision are incomplete. |
+| Unified view of all threads and sessions | Partial | Saved Codex, Claude Code, and Pi sessions can be discovered and searched in a scrollable active-workspace browser. Arbitrary foreground TUIs cannot generally be attached, stale results are not reconciled, and Codex listing is not paginated. |
 | Real-time idle/running/waiting/completed status | Missing at product level | Current PTY heuristics can show startup, activity, attention text, and process exit. Private Codex and Pi fixture decoders normalize success, failure, interruption, and correlated attention, but no production app-server/RPC binding emits those events; Claude hooks also remain absent, so normal completed turns can remain `Working`. |
-| Left sidebar organizes workspaces, agents, sessions | Partial | Workspaces and sessions have agent logos, status text, unread state, and shortcuts. There is no independent collapse, grouping/filtering, global attention inbox, rename, archive, or pinning. |
-| Right sidebar shows files and Git context | Substantially implemented | Files use a collapsible, keyboard-navigable read-only tree with distinct folder icons; modified files, staged/unstaged/untracked diffs, refresh, empty, and error states exist. File open/search, non-Git labeling, richer diff feedback, and browser assistive-technology smoke remain. |
-| Friendly command interface | Partial | The composer sends text to the connected PTY, preserves drafts, and has fixture-verified readiness gating/copy. It has no conversation transcript, tool progress, approvals, structured streaming, real readiness handshake producer, or turn-level interrupt. |
+| Left sidebar organizes workspaces, agents, sessions | Partial | Workspaces and sessions have agent logos, status text, unread state, shortcuts, and entries for the saved-session browser and cross-agent handoff. There is no independent collapse, global attention inbox, rename, archive, or pinning. |
+| Right sidebar shows files and Git context | Substantially implemented | Files use a default-folded, keyboard-navigable read-only tree with Amp-style outline icons. Git changes render lazy-loaded rich local hunks with explicit loading, error/retry, empty, binary, and truncation feedback. File open/search, non-Git labeling, staging, and browser assistive-technology smoke remain. |
+| Friendly command interface | Partial | The composer sends text to the connected PTY, preserves drafts, and has fixture-verified readiness gating/copy plus a host-authoritative normalized readiness channel. A bounded Markdown handoff can prefill a fresh different agent after explicit review, without auto-send. There is still no conversation transcript, tool progress, approvals, structured streaming, provider readiness producer, or turn-level interrupt. |
 | Integrated terminal and direct control | Implemented for Pelican-owned PTYs | The in-process SessionHost owns PTY spawn, stream-scoped input/resize/stop, ordered events, and bounded UI buffering. External Codex/Pi foreground terminals cannot be reattached at the OS PTY level. |
 | Native notifications | Partial | Permission UI and focus-aware attention/process-exit notifications exist. Normal task completion is not known reliably while an interactive CLI remains open. |
 | Keyboard-first operation | Partial | Command palette and core shortcuts exist. Complete panel navigation, lifecycle actions, file-tree navigation, customization, and accessibility validation are missing. |
@@ -50,8 +50,8 @@ Do not mark **unified real-time agent management** complete until the golden wor
 | Saved-session inventory | App-server thread list, partial | Transcript scan, partial | JSONL scan, partial |
 | Resume saved history | `codex resume`, implemented path | `--resume`, implemented path | `--session <absolute path>`, implemented path |
 | Attach a live external session | Not for arbitrary TUI | Background `claude attach` only | Not for arbitrary TUI |
-| Authoritative live lifecycle | Fixture foundation only (CX-01A/LC-02D; no production binding) | Missing | Fixture foundation only (PI-01A serialized prompt/settlement subset; no production binding) |
-| Authoritative prompt readiness producer | Missing | Missing | Missing |
+| Authoritative live lifecycle | Private decoder/supervisor foundation only; no production binding | Missing | Fixture foundation only (PI-01A serialized prompt/settlement subset; no production binding) |
+| Authoritative prompt readiness producer | Private handshake path verified; no production binding | Host channel only; provider producer missing | Host channel only; provider producer missing |
 | Target structured transport | Long-lived app-server | Lifecycle hooks/background inventory | RPC or extension events |
 
 ## Implementation checklist by workflow
@@ -81,6 +81,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 - [x] Show a disabled/spinning refresh control while discovery is in flight.
 - [x] Merge by provider identity without overwriting a connected Pelican lifecycle.
 - [x] Restore resumable records as `Available`, never falsely as live.
+- [x] Search/filter saved sessions from all three providers in the active workspace and resume only exact stopped handles.
 - [ ] PARTIAL — Surface a distinct result for “no sessions” versus “provider discovery failed.”
 - [ ] PARTIAL — Mark disappeared live inventory rows stale/offline.
 - [ ] PARTIAL — Paginate Codex results beyond the first 200 roots.
@@ -97,7 +98,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 - [x] A fresh welcome TUI begins `Idle`, not `Working`.
 - [x] Prevent duplicate resume/attach clicks with an immediate in-flight lock.
 - [x] Prevent duplicate new-session launches before React rerenders.
-- [ ] MISSING — Wait for an agent-ready handshake before enabling prompt submission. CAP-01A adds fixture policy/readiness copy only; fallback PTY remains sendable and no provider readiness producer exists.
+- [ ] PARTIAL — Wait for an agent-ready handshake before enabling prompt submission. CAP-01B makes readiness host-authoritative and replayable, but fallback PTY remains sendable and no provider readiness producer exists.
 - [ ] PARTIAL — Reconcile every new session with its provider ID and saved resume handle.
 
 ### Resume and attach
@@ -106,6 +107,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 - [x] A supported Claude background job presents `Attach`.
 - [x] Unsupported foreground attachment says `Running in another terminal`.
 - [x] Resume/attach shows a launching state, restores prior state on failure, and opens the real provider TUI on success.
+- [x] A bounded, scrollable saved-session browser keeps provider identity and exact resume handles intact.
 - [ ] PARTIAL — Prove with real-provider fixtures that the resumed conversation contains a unique prior marker.
 - [ ] MISSING — Detect/prevent concurrent resume of the same provider history in separate processes.
 - [ ] MISSING — Rejoin Pelican-owned live sessions after the UI restarts.
@@ -116,6 +118,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 - [x] Block empty or duplicate sends and display `Sending…`.
 - [x] Use bracketed paste for multiline input and restore the draft on write failure.
 - [x] Refuse sending while disconnected and offer Resume/Attach where supported.
+- [ ] PARTIAL — Cross-agent handoff fixture-normalizes visible saved user/assistant text into editable Markdown, excludes known private/provider fields, and preloads a new different agent's draft without auto-send. Native three-provider transcript compatibility remains unverified.
 - [ ] PARTIAL — A successful fallback send currently means “bytes reached the PTY,” not “the provider accepted a turn.” CAP-01A blocks structured fixtures until authoritative ready, but no production readiness producer exists.
 - [ ] MISSING — Conversation history, streamed responses, tool activity, approvals, progress, and usage.
 - [ ] MISSING — Interrupt a turn without killing the whole CLI process.
@@ -123,7 +126,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 
 ### Terminal surface
 
-- [x] Prompt/Terminal switching keeps one PTY and does not spawn a second agent.
+- [x] PTY bindings keep Prompt/Terminal switching on one PTY; protocol bindings are Prompt-only and never mount a fake terminal.
 - [x] Input, resize, focus, ANSI rendering, UTF-8 split handling, and bounded replay exist.
 - [x] A disconnected Terminal tab shows an honest recovery screen instead of a fake welcome TUI.
 - [x] A hidden terminal is inert and removed entirely for disconnected sessions.
@@ -151,10 +154,10 @@ Do not mark **unified real-time agent management** complete until the golden wor
 - [x] Diff handling is path-safe, timeout-bounded, UTF-8-safe, and size-bounded.
 - [x] Initial loading, background refresh, clean/empty, and independent error feedback exist.
 - [ ] PARTIAL — Show file-scan depth/entry truncation instead of silently stopping.
-- [ ] PARTIAL — Give diff loading and diff failure their own visual state and retry.
+- [x] Diff loading, native failure/retry, empty text, binary files, and Pelican truncation have distinct visual states.
 - [ ] PARTIAL — Label a non-Git workspace neutrally rather than “Working tree clean.”
-- [ ] PARTIAL — Expand/collapse and fixture-tested keyboard tree navigation exist; file open/reveal/copy path, search, and browser assistive-technology smoke remain.
-- [ ] MISSING — Rich hunks, binary-file state, and optional stage/unstage actions.
+- [ ] PARTIAL — The tree starts folded to top-level, uses Amp-style folder/FileCode outlines, and has fixture-tested keyboard navigation; file open/reveal/copy path, search, and browser assistive-technology smoke remain.
+- [ ] PARTIAL — `@pierre/diffs` renders local rich hunks and binary state; optional stage/unstage actions and native visual acceptance remain missing.
 
 ### Notifications
 
@@ -169,7 +172,7 @@ Do not mark **unified real-time agent management** complete until the golden wor
 ### Keyboard and accessibility
 
 - [x] `⌘K`, palette filtering, arrow selection, Enter, Escape, focus trap, and focus restoration exist.
-- [x] `⇧⌘N`, `⇧⌘O`, `⇧⌘G`, `⇧⌘E`, `⌘,`, Control-backtick, `⌘1…9`, and `⌘Enter` exist.
+- [x] `⇧⌘N`, `⇧⌘O`, `⇧⌘G`, `⇧⌘E`, `⌘,`, capability-gated Control-backtick, `⌘1…9`, and `⌘Enter` exist.
 - [x] Focus-visible and reduced-motion styles exist.
 - [ ] PARTIAL — Ensure global shortcuts never corrupt direct terminal input.
 - [ ] MISSING — Next/previous workspace/session, focus-panel, stop/resume, and refresh shortcuts.
@@ -217,7 +220,7 @@ Run every item for **Codex, Claude Code, and Pi**:
 - [ ] Confirm file/Git context refreshes without stealing selection or focus.
 - [ ] Trigger an approval or user question and confirm `Working → Needs attention`.
 - [ ] With Pelican unfocused, receive exactly one correctly named notification.
-- [ ] Reply in Prompt mode, then use Terminal mode, proving both control the same conversation.
+- [ ] For a PTY binding, reply in Prompt mode and then use Terminal mode, proving both control the same conversation; for a protocol binding, confirm Terminal controls are absent.
 - [ ] Confirm `Needs attention → Working` after the response.
 - [ ] Let the turn finish while keeping the CLI open; confirm `Working → Done`.
 - [ ] Open the result; confirm unread clears and `Done → Idle`.
