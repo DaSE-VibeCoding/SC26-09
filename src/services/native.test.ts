@@ -1,0 +1,25 @@
+import { describe, expect, it } from "vitest";
+import { spawnTerminal, writeTerminal, stopTerminal, isTauri } from "./native";
+
+describe("native terminal guards", () => {
+  it("reports that Vitest runs outside the Tauri webview", () => {
+    expect(isTauri()).toBe(false);
+  });
+
+  it("refuses to spawn a terminal outside Tauri instead of silently succeeding", async () => {
+    await expect(spawnTerminal({
+      sessionId: "test",
+      cwd: "/tmp",
+      program: "/bin/echo",
+      args: ["hi"],
+      env: {},
+      rows: 24,
+      cols: 80,
+    })).rejects.toThrow(/Pelican desktop app/);
+  });
+
+  it("refuses to write or stop a terminal outside Tauri", async () => {
+    await expect(writeTerminal("test", "x")).rejects.toThrow(/Pelican desktop app/);
+    await expect(stopTerminal("test")).rejects.toThrow(/Pelican desktop app/);
+  });
+});
